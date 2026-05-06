@@ -1,79 +1,104 @@
 # E-Class Educational System 🎓🤖
 
-A next-generation educational ecosystem combining a powerful **Next.js 16 Admin Portal** and an interactive **Telegram Bot**. This platform allows educators to manage students, distribute study materials, and conduct real-time, timed quizzes directly inside Telegram.
+A premium, all-in-one educational platform designed for educators. It features a high-aesthetic **Next.js 16 Administrative Portal** and a fully integrated **Telegram Bot** for automated student registration, real-time timed quizzes, and study material distribution.
 
-## 🌟 Features
+---
 
-### For Students (Telegram Bot)
-- **Seamless Registration**: Students register directly via Telegram.
-- **Interactive Quizzes**: Real-time timed quizzes using Native Telegram Polls.
-- **Instant Scoring**: Automated scoring based on response time and accuracy.
-- **Material Access**: Download PDF tutorials, past papers, and study guides.
-- **Leaderboards**: View top performers and personal rank.
-- **Automated Answer Keys**: Receives dynamically generated PDF answer keys with explanations after quizzes.
+## 🌟 Key Features
 
-### For Administrators (Next.js Dashboard)
-- **Secure Admin Portal**: Protected dashboard for complete ecosystem management.
-- **Quiz Scheduling**: Create, schedule, and trigger mass quiz sessions.
-- **Material Management**: Upload and categorize PDFs and resources.
-- **Student Analytics**: Track student engagement and performance over time.
+### 👨‍🎓 For Students (Telegram Bot)
+- **Instant Registration**: Students register with their full name and phone number directly via the bot.
+- **Timed Quizzes**: Participate in live, competitive quizzes using Native Telegram Polls.
+- **Dynamic Scoring**: Points are calculated based on accuracy and response time (15s rule).
+- **Study Materials**: Access and download PDF tutorials and past papers organized by category.
+- **Live Leaderboard**: Real-time ranking of students based on their quiz performance.
+- **Automated Results**: Receive a professionally generated PDF Answer Key after each quiz session.
 
-## 🚀 Tech Stack
+### 👨‍💼 For Administrators (Dashboard)
+- **Secure Management Hub**: A dedicated `/admin` portal protected by encrypted session cookies.
+- **Quiz Orchestrator**: Create, schedule, and broadcast quizzes to your Telegram channel.
+- **Resource Manager**: Upload and categorize PDF study materials.
+- **Student Analytics**: View and search registered students and their contact details.
+- **Live Monitoring**: Track active quiz progress and winner standings.
 
-- **Frontend**: Next.js 16 (App Router), React, Tailwind CSS, Lucide Icons.
-- **Backend**: Next.js API Routes (Serverless), Node.js.
-- **Database**: Supabase (PostgreSQL) with Row-Level Security (RLS) and Realtime Subscriptions.
-- **Bot Framework**: `node-telegram-bot-api`.
-- **PDF Generation**: `pdfkit`.
+---
 
-## 🛠️ Getting Started
+## 🛠️ Technology Stack
 
-### Prerequisites
-- Node.js (v18+)
-- A [Supabase](https://supabase.com/) account and project.
-- A Telegram Bot Token from [BotFather](https://t.me/botfather).
+- **Frontend/Admin**: Next.js 16 (App Router), React 19, Tailwind CSS, Lucide Icons.
+- **Backend**: Next.js Route Handlers (Edge & Node.js).
+- **Database**: Supabase (PostgreSQL) with Row-Level Security (RLS).
+- **Telegram Logic**: `node-telegram-bot-api`.
+- **PDF Generation**: `pdfkit` & `pdf-lib`.
 
-### Installation & Setup
+---
 
-1. **Clone the repository:**
-   ```bash
-   git clone <your-repository-url>
-   cd eclassbot
-   ```
+## 🚀 Getting Started
 
-2. **Install dependencies:**
-   ```bash
-   npm install
-   ```
+Follow these steps to set up the system on your local machine.
 
-3. **Database Setup:**
-   - Go to your Supabase SQL Editor.
-   - Run the SQL scripts provided in the root directory (e.g., `eclass.sql`, `migration_native_polls.sql`, etc.) to create the necessary tables and policies.
+### 1. Prerequisites
+- **Node.js**: Ensure you have Node.js (v18 or higher) installed.
+- **Supabase Account**: Create a free project at [supabase.com](https://supabase.com/).
+- **Telegram Bot**: Create a bot via [@BotFather](https://t.me/botfather) and get the API Token.
+- **Telegram Channel**: Create a channel where the quizzes will be posted and add your bot as an administrator.
 
-4. **Environment Variables:**
-   - Create a `.env` file in the root directory.
-   - Add the following keys (replace with your actual credentials):
-     ```env
-     NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-     NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
-     SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
-     TELEGRAM_BOT_TOKEN=your-telegram-bot-token
-     TELEGRAM_CHANNEL_ID=-100xxxxxxxxxx
-     ADMIN_PASSWORD=your-secure-password
-     NEXT_PUBLIC_APP_URL=http://localhost:3000
-     ```
+### 2. Installation
+```bash
+git clone https://github.com/pramodchandima/EClass-OS.git
+cd EClass-OS
+npm install
+```
 
-5. **Run the Development Server:**
-   ```bash
-   npm run dev
-   ```
+### 3. Database Configuration
+1. Login to your **Supabase Dashboard**.
+2. Go to the **SQL Editor**.
+3. Copy the contents of the `eclass.sql` file (found in the root of this project) and run it. This will create all necessary tables (`students`, `polls`, `materials`, etc.) and the `leaderboard` view.
 
-6. **Access the Admin Portal:**
-   - Navigate to `http://localhost:3000/admin/login`
-   - Use the `ADMIN_PASSWORD` you set in the `.env` file to log in.
+### 4. Environment Variables
+Create a file named `.env` in the root directory and fill in your details:
 
-## 🔒 Security & Privacy
-This repository is configured to exclude all private credentials and environment files (`.env`). Please ensure you do not hardcode any sensitive API keys or passwords directly into the source code before pushing to public repositories.
+```env
+# Supabase Credentials (Found in Settings > API)
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+
+# Telegram Credentials
+TELEGRAM_BOT_TOKEN=your-bot-token-from-bot-father
+TELEGRAM_CHANNEL_ID=-100xxxxxxxxxx  # Your channel ID (use @userinfobot to find it)
+
+# Admin Security
+ADMIN_PASSWORD=your-secure-password  # Use this to log in to /admin
+
+# App Configuration
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+```
+
+### 5. Running Locally
+Start the development server:
+```bash
+npm run dev
+```
+
+### 6. Exposing to Telegram (Optional / Webhooks)
+If you need to test Telegram interactions locally, you can use **ngrok**:
+```bash
+ngrok http 3000
+```
+Update your `NEXT_PUBLIC_APP_URL` in `.env` with the ngrok URL (e.g., `https://xxxx-xxx.ngrok-free.dev`).
+
+### 7. Accessing the Portal
+- **Landing Page**: `http://localhost:3000`
+- **Admin Dashboard**: `http://localhost:3000/admin` (Redirects to login)
+- **Admin Login**: Use the `ADMIN_PASSWORD` from your `.env` file.
+
+---
+
+## 🔒 Security & Deployment
+- The project is configured with **Row Level Security (RLS)** to protect your database.
+- Always use the **Service Role Key** only in server-side logic (already configured in `lib/supabaseAdmin.ts`).
+- For production, it is recommended to deploy on **Vercel** for the best Next.js compatibility.
 
 ---
 *Designed & Developed by Pramod*

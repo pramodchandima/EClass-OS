@@ -1,2 +1,0 @@
-npm run dev
-C:\Users\CHAMA COMPUTERS\Desktop\eclassbot>ngrok http 3000  
