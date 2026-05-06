@@ -3,195 +3,136 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import bot from '@/lib/telegram';
 import { generateAnswerKey } from '@/lib/pdfGenerator';
 import {
-    validateAdminSecret,
-    validateAdminCookie,
-    unauthorizedResponse,
-    successResponse,
-    serverErrorResponse
+    validateAdminSecret, validateAdminCookie,
+    unauthorizedResponse, successResponse, serverErrorResponse,
 } from '@/lib/api-utils';
 
-/**
- * INTERNAL TYPES
- */
 type SequenceAction = 'broadcast_winners' | 'initiate_quiz' | undefined;
 
-interface AnswerWithStudent {
+interface AnswerRow {
     earned_points: number;
     student_id: string;
-    students: {
-        full_name: string;
-    };
+    students: { full_name: string };
 }
 
 /**
- * SEQUENTIAL QUIZ SESSION RUNNER
- * Handles the lifecycle of a mass quiz session:
- * 1. Broadcasts an invitation to the official channel with a deep-link.
- * 2. Processes automated podium triggers to announce the Top 3 performers.
- * 3. Generates and publishes the bilingual Answer Key PDF.
+ * POST /api/quizzes/sequence
+ * Manages the full lifecycle of a mass quiz session:
+ *  - Default: broadcasts an invitation to the channel with a deep-link start button.
+ *  - action='broadcast_winners': calculates the Top 3 podium, posts it, and publishes the Answer Key PDF.
  */
 export async function POST(req: NextRequest) {
     try {
-        // 🔒 SECURITY: Unified Admin Validation (Headers + Cookies)
-        if (!validateAdminSecret(req) && !validateAdminCookie(req)) {
-            return unauthorizedResponse();
-        }
+        if (!validateAdminSecret(req) && !validateAdminCookie(req)) return unauthorizedResponse();
 
-        const body = await req.json();
-        const { setId, setName, action } = body as { setId?: string; setName?: string; action?: SequenceAction };
+        const { setId, setName, action } = (await req.json()) as {
+            setId?: string;
+            setName?: string;
+            action?: SequenceAction;
+        };
 
-        const targetSetId = setId;
-        let targetSetName = setName;
         const channelId = process.env.TELEGRAM_CHANNEL_ID;
+        if (!setId || !channelId) throw new Error('Mandatory context (Set ID or Channel ID) is missing.');
 
-        if (!targetSetId || !channelId) {
-            throw new Error('Mandatory context (Set ID or Channel ID) is missing.');
-        }
+        // Resolve set name if not provided by the caller
+        const targetSetName = setName ?? (await supabaseAdmin
+            .from('quiz_sets').select('name').eq('id', setId).single()
+        ).data?.name ?? 'Untitled Quiz';
 
-        // 1. Resolve Set Name if missing
-        if (!targetSetName) {
-            const { data } = await supabaseAdmin.from('quiz_sets').select('name').eq('id', targetSetId).single();
-            targetSetName = data?.name || 'Untitled Quiz';
-        }
-
-        // 🏆 ACTION: BROADCAST WINNERS & PODIUM
+        // ── ACTION: Announce Winners & Publish PDF ────────────────────────────
         if (action === 'broadcast_winners') {
-            /**
-             * AGGREGATED SCORE QUERY
-             * We fetch all correct answers for this specific quiz set and 
-             * aggregate them by student in-memory to resolve the Top 3 performers.
-             */
             const { data: answers, error: resError } = await supabaseAdmin
                 .from('poll_answers')
-                .select(`
-                    earned_points,
-                    student_id,
-                    students (
-                        full_name
-                    ),
-                    polls!inner (
-                        quiz_set_id
-                    )
-                `)
-                .eq('polls.quiz_set_id', targetSetId);
+                .select('earned_points, student_id, students(full_name), polls!inner(quiz_set_id)')
+                .eq('polls.quiz_set_id', setId);
 
             if (resError || !answers) {
-                console.error('[Podium] Database Error:', resError);
-                throw new Error('Could not calculate podium results from database.');
+                console.error('[Podium] DB error:', resError);
+                throw new Error('Could not calculate podium results.');
             }
 
-            // Aggregate results in memory: { [student_id]: { name, pts } }
+            // Aggregate scores in memory: O(N)
             const scoreMap: Record<string, { name: string; pts: number }> = {};
-
-            (answers as unknown as any[]).forEach((ans: any) => {
-                const sId = ans.student_id;
-                const sName = ans.students?.full_name || 'Anonymous Student';
-                const pts = ans.earned_points || 0;
-
-                if (!scoreMap[sId]) {
-                    scoreMap[sId] = { name: sName, pts: 0 };
+            for (const ans of answers as unknown as AnswerRow[]) {
+                if (!scoreMap[ans.student_id]) {
+                    scoreMap[ans.student_id] = { name: ans.students?.full_name ?? 'Anonymous', pts: 0 };
                 }
-                scoreMap[sId].pts += pts;
-            });
+                scoreMap[ans.student_id].pts += ans.earned_points ?? 0;
+            }
 
-            // Sort and take Top 3
-            const sortedWinners = Object.values(scoreMap)
-                .sort((a, b) => b.pts - a.pts)
-                .slice(0, 3);
-
-            if (sortedWinners.length === 0) return successResponse();
+            const top3 = Object.values(scoreMap).sort((a, b) => b.pts - a.pts).slice(0, 3);
+            if (!top3.length) return successResponse();
 
             const medals = ['🥇', '🥈', '🥉'];
-            let podium = `🏆 *THE WINNERS PODIUM* 🏆\n\nSession: *${targetSetName}*\n\n`;
+            const podium = `🏆 *THE WINNERS PODIUM* 🏆\n\nSession: *${targetSetName}*\n\n` +
+                top3.map((s, i) => `${medals[i] ?? '🎖️'} *${s.name}* — ${s.pts} Points`).join('\n') +
+                '\n\n🌟 Congratulations to everyone who participated!';
 
-            sortedWinners.forEach((s, i) => {
-                podium += `${medals[i] || '🎖️'} *${s.name}* — ${s.pts} Points\n`;
-            });
-
-            podium += `\n🌟 Congratulations to everyone who participated!`;
             await bot.sendMessage(channelId, podium, { parse_mode: 'Markdown' });
 
-            // 📄 AUTOMATED PDF SYNTHESIS
-            try {
-                const { data: allPolls } = await supabaseAdmin
-                    .from('polls')
-                    .select('*')
-                    .eq('quiz_set_id', targetSetId)
-                    .order('order_index', { ascending: true });
+            // PDF synthesis is non-blocking for the podium broadcast
+            (async () => {
+                try {
+                    const { data: allPolls, error: fetchErr } = await supabaseAdmin.from('polls').select('*').eq('quiz_set_id', setId).order('order_index', { ascending: true });
+                    if (fetchErr) throw fetchErr;
+                    if (!allPolls?.length) return;
 
-                if (allPolls && allPolls.length > 0) {
-                    const safeSetName = targetSetName || 'Quiz Results';
-                    const pdfBuffer = await generateAnswerKey(safeSetName, allPolls);
-
+                    const pdfBuffer = await generateAnswerKey(targetSetName, allPolls);
+                    const filename = `${targetSetName.replace(/\s+/g, '_')}_Answers.pdf`;
                     await bot.sendDocument(channelId, pdfBuffer, {
-                        caption: `📚 *OFFICIAL ANSWER KEY & REVIEW SHEET*\n\nTopic: *${targetSetName}*\nQuestions: *${allPolls.length}*\n\nUse this to review your performance and prepare for next time! 🎓💎`,
-                        parse_mode: 'Markdown'
-                    }, { filename: `${safeSetName.replace(/\s+/g, '_')}_Answers.pdf` });
+                        caption: `📚 *OFFICIAL ANSWER KEY & REVIEW SHEET*\n\nTopic: *${targetSetName}*\nQuestions: *${allPolls.length}*\n\nUse this to review your performance! 🎓💎`,
+                        parse_mode: 'Markdown',
+                    }, { filename });
+                } catch (err) {
+                    console.error('[Sequence] PDF publication failed:', err);
                 }
-            } catch (pdfErr) {
-                console.error('[Sequence] Automated PDF publication failed:', pdfErr);
-            }
+            })();
 
-            // Update Set Status
-            await supabaseAdmin.from('quiz_sets').update({ status: 'completed' }).eq('id', targetSetId);
+            await supabaseAdmin.from('quiz_sets').update({ status: 'completed' }).eq('id', setId);
             return successResponse();
         }
 
-        // 🚀 ACTION: BROADCAST INVITATION (Default)
-        const { count } = await supabaseAdmin
-            .from('polls')
-            .select('*', { count: 'exact', head: true })
-            .eq('quiz_set_id', targetSetId);
+        // ── DEFAULT ACTION: Broadcast Invitation ──────────────────────────────
+        const [{ count }, botInfo] = await Promise.all([
+            supabaseAdmin.from('polls').select('*', { count: 'exact', head: true }).eq('quiz_set_id', setId),
+            bot.getMe(),
+        ]);
 
-        const botInfo = await bot.getMe();
-        const startLink = `https://t.me/${botInfo.username}?start=quizset_${targetSetId}`;
-
-        const invitation = `🌟 *NEW QUIZ SESSION IS LIVE!* 🌟\n\n` +
+        const startLink = `https://t.me/${botInfo.username}?start=quizset_${setId}`;
+        const invitation =
+            `🌟 *NEW QUIZ SESSION IS LIVE!* 🌟\n\n` +
             `📚 Topic: *${targetSetName}*\n` +
-            `🔢 Questions: *${count || 0}*\n` +
+            `🔢 Questions: *${count ?? 0}*\n` +
             `⏱️ Time Limit: *15s per Question*\n\n` +
             `Click the button below to start your private session. Good luck! 🚀`;
 
         await bot.sendMessage(channelId, invitation, {
             parse_mode: 'Markdown',
-            reply_markup: {
-                inline_keyboard: [
-                    [{ text: "🚀 START QUIZ NOW", url: startLink }]
-                ]
-            }
+            reply_markup: { inline_keyboard: [[{ text: '🚀 START QUIZ NOW', url: startLink }]] },
         });
 
-        await supabaseAdmin.from('quiz_sets').update({ is_published: true, status: 'ongoing' }).eq('id', targetSetId);
+        await supabaseAdmin.from('quiz_sets').update({ is_published: true, status: 'ongoing' }).eq('id', setId);
 
-        // 🕒 AUTOMATIC PODIUM SCHEDULING (Background)
-        const totalQuestions = count ?? 0;
-        const currentSetName = targetSetName ?? 'Ongoing Quiz';
-        const waitTimeMs = (totalQuestions * 15000) + 60000;
-
-        console.log(`[Podium] Automated broadcast scheduled for ${currentSetName} in ${waitTimeMs / 1000}s`);
+        // Schedule automatic podium broadcast after all questions have had time to be answered
+        const waitMs = ((count ?? 0) * 15_000) + 60_000;
+        console.log(`[Podium] Scheduled for "${targetSetName}" in ${waitMs / 1000}s`);
 
         setTimeout(async () => {
+            const adminSecret = process.env.ADMIN_PASSWORD;
+            if (!adminSecret) { console.error('[Podium] ADMIN_PASSWORD not set — cannot auto-trigger.'); return; }
             try {
-                const adminSecret = process.env.ADMIN_PASSWORD;
-                if (!adminSecret) throw new Error('ADMIN_PASSWORD not configured');
-
-                // Self-trigger the winners broadcast with security header
                 await fetch(`${process.env.NEXT_PUBLIC_APP_URL}/api/quizzes/sequence`, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'x-admin-secret': adminSecret
-                    },
-                    body: JSON.stringify({ setId: targetSetId, action: 'broadcast_winners' })
+                    headers: { 'Content-Type': 'application/json', 'x-admin-secret': adminSecret },
+                    body: JSON.stringify({ setId, action: 'broadcast_winners' }),
                 });
             } catch (err) {
-                console.error(`[Podium] Automated trigger failed:`, err);
+                console.error('[Podium] Auto-trigger failed:', err);
             }
-        }, waitTimeMs);
+        }, waitMs);
 
         return successResponse();
-
-    } catch (error: any) {
+    } catch (error) {
         return serverErrorResponse(error);
     }
 }

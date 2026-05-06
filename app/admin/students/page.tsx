@@ -1,12 +1,10 @@
 'use client';
 
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Users, Search, RefreshCw } from 'lucide-react';
+import toast from 'react-hot-toast';
 
-/**
- * DATA INTERFACES
- */
 interface Student {
     id: string;
     telegram_id: number;
@@ -15,17 +13,12 @@ interface Student {
     joined_at: string;
 }
 
-/**
- * STUDENT DIRECTORY PAGE
- * Provides a real-time list of registered students with search capabilities.
- */
+/** Admin Students Directory — real-time list with client-side search. */
 export default function StudentsPage() {
-    // --- STATE ---
     const [students, setStudents] = useState<Student[]>([]);
-    const [search, setSearch] = useState('');
-    const [loading, setLoading] = useState(true);
+    const [search, setSearch]     = useState('');
+    const [loading, setLoading]   = useState(true);
 
-    // --- DATA FETCHING ---
     const fetchStudents = useCallback(async () => {
         setLoading(true);
         try {
@@ -35,57 +28,40 @@ export default function StudentsPage() {
                 .order('joined_at', { ascending: false });
 
             if (error) {
-                console.error('[Students] Fetch Error:', error);
-            } else if (data) {
-                setStudents(data);
-            }
+                console.error('[Students] Fetch error:', error);
+                toast.error('Failed to load students list');
+            } else if (data) setStudents(data);
+        } catch (err) {
+            console.error('[Students] Unexpected error:', err);
         } finally {
             setLoading(false);
         }
     }, []);
 
-    // --- REALTIME SUBSCRIPTION ---
     useEffect(() => {
         fetchStudents();
 
-        /**
-         * Listen for any changes in the 'students' table to keep the UI in sync.
-         */
+        // Live-sync: refresh the list whenever any student row changes
         const channel = supabase
-            .channel('students_realtime_changes')
-            .on('postgres_changes', {
-                event: '*',
-                schema: 'public',
-                table: 'students'
-            }, () => {
-                fetchStudents();
-            })
+            .channel('students_realtime')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, fetchStudents)
             .subscribe();
 
-        return () => {
-            supabase.removeChannel(channel);
-        };
+        return () => { supabase.removeChannel(channel); };
     }, [fetchStudents]);
 
-    // --- PERFORMANCE: FILTERING (useMemo) ---
-    /**
-     * Efficiently filters students based on name or phone number.
-     * Prevents re-filtering unless 'students' or 'search' query changes.
-     */
+    // Client-side filter — recomputed only when students or search changes
     const filteredStudents = useMemo(() => {
-        const query = search.trim().toLowerCase();
-        if (!query) return students;
-
+        const q = search.trim().toLowerCase();
+        if (!q) return students;
         return students.filter(s =>
-            s.full_name.toLowerCase().includes(query) ||
-            s.phone_number.includes(query)
+            s.full_name.toLowerCase().includes(q) || s.phone_number.includes(q)
         );
     }, [students, search]);
 
-    // --- RENDER ---
     return (
         <div className="space-y-8">
-            {/* HEADER SECTION */}
+            {/* HEADER */}
             <div className="flex justify-between items-center bg-[#111111] border border-zinc-800 p-6 rounded-2xl shadow-xl">
                 <div>
                     <h2 className="text-3xl font-bold text-white flex items-center gap-3">
@@ -100,7 +76,7 @@ export default function StudentsPage() {
                 </div>
             </div>
 
-            {/* SEARCH & REFRESH TOOLS */}
+            {/* SEARCH & REFRESH */}
             <div className="flex gap-4 items-center">
                 <div className="relative flex-1">
                     <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500" size={18} />
@@ -143,8 +119,6 @@ export default function StudentsPage() {
                                 </td>
                             </tr>
                         ))}
-
-                        {/* EMPTY STATE */}
                         {filteredStudents.length === 0 && (
                             <tr>
                                 <td colSpan={4} className="px-6 py-12 text-center text-zinc-600 italic">

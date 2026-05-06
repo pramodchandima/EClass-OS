@@ -1,39 +1,23 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
+import toast from 'react-hot-toast';
 
 /**
  * TELEGRAM WEBAPP INTERFACE
  * Provides type safety for the 'window.Telegram.WebApp' global object.
  */
-interface TelegramWebApp {
-    ready: () => void;
-    expand: () => void;
-    close: () => void;
-    initDataUnsafe?: {
-        user?: {
-            id: number;
-            first_name?: string;
-            last_name?: string;
-            username?: string;
-        };
-    };
-}
+import type { TelegramWebApp } from '@/lib/types';
 
-declare global {
-    interface Window {
-        Telegram?: {
-            WebApp: TelegramWebApp;
-        };
-    }
-}
+// Global Window.Telegram is augmented in lib/types.ts
+
 
 /**
  * STUDENT REGISTRATION PAGE
  * Collects student details and links them to their Telegram ID via a secure WebApp interface.
  */
-export default function RegisterPage() {
+function RegisterContent() {
     // --- STATE ---
     const [fullName, setFullName] = useState('');
     const [phoneNumber, setPhoneNumber] = useState('');
@@ -85,7 +69,7 @@ export default function RegisterPage() {
 
         if (!tid) {
             console.error('[Registration] Missing Telegram ID');
-            return alert('Error: Telegram ID not found. Please open this link via the Telegram Bot.');
+            return toast.error('Error: Telegram ID not found. Please open this link via the Telegram Bot.');
         }
 
         setLoading(true);
@@ -107,14 +91,14 @@ export default function RegisterPage() {
                 if (window.Telegram?.WebApp) {
                     window.Telegram.WebApp.close();
                 } else {
-                    alert('Registration successful! You can now close this window.');
+                    toast.success('Registration successful! You can now close this window.');
                 }
             } else {
-                alert(`Error: ${data.error || 'Registration failed'}`);
+                toast.error(`Error: ${data.error || 'Registration failed'}`);
             }
         } catch (err) {
             console.error('[Registration] Network Error:', err);
-            alert('A network error occurred. Please check your connection and try again.');
+            toast.error('A network error occurred. Please check your connection and try again.');
         } finally {
             setLoading(false);
         }
@@ -201,5 +185,20 @@ export default function RegisterPage() {
                 </form>
             </div>
         </div>
+    );
+}
+
+export default function RegisterPage() {
+    return (
+        <Suspense fallback={
+            <div className="min-h-screen bg-black text-white flex flex-col items-center justify-center p-6 text-center">
+                <div className="flex flex-col items-center gap-4">
+                    <div className="w-12 h-12 border-4 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                    <p className="text-zinc-400 font-medium">Loading...</p>
+                </div>
+            </div>
+        }>
+            <RegisterContent />
+        </Suspense>
     );
 }

@@ -3,6 +3,8 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import Script from "next/script";
 
+import { Toaster } from 'react-hot-toast';
+
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],
@@ -32,7 +34,14 @@ export default function RootLayout({
       <head>
         <Script src="https://telegram.org/js/telegram-web-app.js" strategy="beforeInteractive" />
       </head>
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <Toaster position="top-center" toastOptions={{
+          style: { background: '#18181b', color: '#fff', border: '1px solid #27272a' },
+          success: { iconTheme: { primary: '#22c55e', secondary: '#18181b' } },
+          error: { iconTheme: { primary: '#ef4444', secondary: '#18181b' } }
+        }} />
+        {children}
+      </body>
     </html>
   );
 }

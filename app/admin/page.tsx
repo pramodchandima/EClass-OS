@@ -4,10 +4,8 @@ import { useEffect, useState, useCallback, useMemo } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Users, BookOpen, Clock, Trophy, ArrowRight } from 'lucide-react';
 import Link from 'next/link';
+import toast from 'react-hot-toast';
 
-/**
- * DASHBOARD DATA INTERFACES
- */
 interface DashboardStats {
     students: number;
     materials: number;
@@ -15,81 +13,45 @@ interface DashboardStats {
 }
 
 /**
- * ADMIN DASHBOARD HUB
- * The landing page for the administrative portal. Provides a high-level overview 
- * of student engagement, resource availability, and quiz scheduling.
+ * Admin Dashboard Hub
+ * Loads three Supabase count queries in parallel for fast initial render.
  */
 export default function AdminDashboard() {
-    // --- STATE ---
-    const [stats, setStats] = useState<DashboardStats>({
-        students: 0,
-        materials: 0,
-        polls: 0,
-    });
+    const [stats, setStats]   = useState<DashboardStats>({ students: 0, materials: 0, polls: 0 });
     const [loading, setLoading] = useState(true);
 
-    // --- DATA FETCHING ---
     const fetchStats = useCallback(async () => {
         try {
-            // Fetch counts in parallel for optimal loading performance
-            const [
-                { count: studentCount },
-                { count: materialCount },
-                { count: pollCount }
-            ] = await Promise.all([
+            const [{ count: studentCount }, { count: materialCount }, { count: pollCount }] = await Promise.all([
                 supabase.from('students').select('*', { count: 'exact', head: true }),
                 supabase.from('materials').select('*', { count: 'exact', head: true }),
-                supabase.from('polls').select('*', { count: 'exact', head: true })
+                supabase.from('polls').select('*', { count: 'exact', head: true }),
             ]);
 
             setStats({
-                students: studentCount || 0,
-                materials: materialCount || 0,
-                polls: pollCount || 0,
+                students:  studentCount  ?? 0,
+                materials: materialCount ?? 0,
+                polls:     pollCount     ?? 0,
             });
         } catch (err) {
-            console.error('[Dashboard] Stats Fetch Error:', err);
+            console.error('[Dashboard] Stats fetch failed:', err);
+            toast.error('Failed to load dashboard statistics');
         } finally {
             setLoading(false);
         }
     }, []);
 
-    useEffect(() => {
-        fetchStats();
-    }, [fetchStats]);
+    useEffect(() => { fetchStats(); }, [fetchStats]);
 
-    // --- MEMOIZED CONFIGURATION ---
     const cards = useMemo(() => [
-        {
-            title: 'Total Students',
-            value: stats.students,
-            icon: Users,
-            color: 'text-purple-500',
-            href: '/admin/students',
-            description: 'Registered users across all programs.'
-        },
-        {
-            title: 'Materials',
-            value: stats.materials,
-            icon: BookOpen,
-            color: 'text-blue-500',
-            href: '/admin/materials',
-            description: 'PDF resources and study guides.'
-        },
-        {
-            title: 'Scheduled Quizzes',
-            value: stats.polls,
-            icon: Clock,
-            color: 'text-orange-500',
-            href: '/admin/quizzes',
-            description: 'Future and active quiz sessions.'
-        },
+        { title: 'Total Students',    value: stats.students,  icon: Users,     color: 'text-purple-500', href: '/admin/students', description: 'Registered users across all programs.' },
+        { title: 'Materials',         value: stats.materials, icon: BookOpen,  color: 'text-blue-500',   href: '/admin/materials', description: 'PDF resources and study guides.' },
+        { title: 'Scheduled Quizzes', value: stats.polls,     icon: Clock,     color: 'text-orange-500', href: '/admin/quizzes', description: 'Future and active quiz sessions.' },
     ], [stats]);
 
-    // --- RENDER ---
     return (
         <div className="space-y-10">
-            {/* HER0 SECTION */}
+            {/* HERO SECTION */}
             <div className="bg-gradient-to-br from-zinc-900 to-black border border-zinc-800 p-10 rounded-3xl shadow-2xl relative overflow-hidden group">
                 <div className="absolute top-0 right-0 p-8 opacity-10 group-hover:opacity-20 transition-opacity">
                     <Trophy size={120} className="text-purple-500" />

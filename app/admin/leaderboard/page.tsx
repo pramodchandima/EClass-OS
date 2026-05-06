@@ -1,25 +1,27 @@
 'use client';
 
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Trophy, Medal, Star, TrendingUp } from 'lucide-react';
 import { LeaderboardEntry } from '@/lib/types';
+import toast from 'react-hot-toast';
+
+// Pre-defined medal gradient classes for the top 3 positions
+const RANK_COLORS = [
+    'from-yellow-400 to-amber-600', // 🥇 Gold
+    'from-zinc-300 to-zinc-500',    // 🥈 Silver
+    'from-orange-400 to-orange-700',// 🥉 Bronze
+];
 
 /**
- * LIVE LEADERBOARD PAGE
- * Displays real-time student rankings based on their accumulated points 
- * from all quiz sessions. Automatically updates when new answers are submitted.
+ * Live Leaderboard Page
+ * Rankings are sorted server-side. A Supabase realtime subscription
+ * triggers a refresh whenever a new poll answer is recorded.
  */
 export default function LeaderboardPage() {
-    // --- STATE ---
     const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading]         = useState(true);
 
-    // --- DATA FETCHING ---
-    /**
-     * Fetches the latest leaderboard view from Supabase.
-     * The 'leaderboard' is a database view that aggregates points per student.
-     */
     const fetchLeaderboard = useCallback(async () => {
         try {
             const { data, error } = await supabase
@@ -27,50 +29,32 @@ export default function LeaderboardPage() {
                 .select('*')
                 .order('total_points', { ascending: false });
 
-            if (!error && data) {
-                setLeaderboard(data as LeaderboardEntry[]);
-            }
+            if (error) {
+                console.error('[Leaderboard] Fetch error:', error);
+                toast.error('Failed to load leaderboard data');
+            } else if (data) setLeaderboard(data as LeaderboardEntry[]);
         } catch (err) {
-            console.error('[Leaderboard] Fetch Error:', err);
+            console.error('[Leaderboard] Unexpected error:', err);
         } finally {
             setLoading(false);
         }
     }, []);
 
-    // --- REAL-TIME SUBSCRIPTION ---
     useEffect(() => {
         fetchLeaderboard();
 
-        // 🟢 REAL-TIME SYNC: Listen for any new 'poll_answers' to trigger a refresh
+        // Refresh when any answer is submitted
         const channel = supabase
             .channel('leaderboard_updates')
-            .on(
-                'postgres_changes',
-                { event: '*', schema: 'public', table: 'poll_answers' },
-                () => {
-                    console.log('[Leaderboard] Updating due to new poll submission...');
-                    fetchLeaderboard();
-                }
-            )
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'poll_answers' }, fetchLeaderboard)
             .subscribe();
 
-        return () => {
-            supabase.removeChannel(channel);
-        };
+        return () => { supabase.removeChannel(channel); };
     }, [fetchLeaderboard]);
 
-    // --- MEMOIZED CONFIGURATION ---
-    const rankColors = useMemo(() => [
-        'from-yellow-400 to-amber-600', // Gold
-        'from-zinc-300 to-zinc-500',   // Silver
-        'from-orange-400 to-orange-700' // Bronze
-    ], []);
+    // Compute max points once for the relative progress bars
+    const maxPoints = leaderboard[0]?.total_points || 1;
 
-    const maxPoints = useMemo(() => {
-        return leaderboard[0]?.total_points || 1;
-    }, [leaderboard]);
-
-    // --- RENDER ---
     return (
         <div className="space-y-8">
             {/* HEADER */}
@@ -92,16 +76,13 @@ export default function LeaderboardPage() {
             <div className="grid grid-cols-1 gap-4">
                 {leaderboard.map((entry, index) => {
                     const isTop3 = index < 3;
-
                     return (
                         <div
                             key={entry.student_id}
-                            className={`bg-[#111111] border border-zinc-800 p-4 rounded-2xl flex items-center gap-6 transition-all hover:scale-[1.01] hover:border-zinc-700 shadow-lg ${isTop3 ? 'ring-1 ring-white/5 bg-zinc-900/50' : ''
-                                }`}
+                            className={`bg-[#111111] border border-zinc-800 p-4 rounded-2xl flex items-center gap-6 transition-all hover:scale-[1.01] hover:border-zinc-700 shadow-lg ${isTop3 ? 'ring-1 ring-white/5 bg-zinc-900/50' : ''}`}
                         >
                             {/* RANK BADGE */}
-                            <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-xl font-black bg-gradient-to-br shadow-inner ${isTop3 ? rankColors[index] : 'from-zinc-800 to-zinc-900 text-zinc-500'
-                                }`}>
+                            <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-xl font-black bg-gradient-to-br shadow-inner ${isTop3 ? RANK_COLORS[index] : 'from-zinc-800 to-zinc-900 text-zinc-500'}`}>
                                 {index === 0 ? <Medal size={24} className="text-white" /> : index + 1}
                             </div>
 
@@ -116,17 +97,16 @@ export default function LeaderboardPage() {
                                 </p>
                             </div>
 
-                            {/* POINTS DISPLAY */}
+                            {/* POINTS */}
                             <div className="text-right pr-4">
                                 <p className="text-2xl font-black text-white">{entry.total_points}</p>
                                 <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-600">Points</p>
                             </div>
 
-                            {/* RELATIVE PROGRESS VISUALIZER */}
+                            {/* RELATIVE PROGRESS BAR */}
                             <div className="hidden md:block w-32 h-2 bg-zinc-800 rounded-full overflow-hidden shadow-inner">
                                 <div
-                                    className={`h-full bg-gradient-to-r transition-all duration-1000 ${isTop3 ? rankColors[index] : 'from-purple-600 to-blue-600'
-                                        }`}
+                                    className={`h-full bg-gradient-to-r transition-all duration-1000 ${isTop3 ? RANK_COLORS[index] : 'from-purple-600 to-blue-600'}`}
                                     style={{ width: `${Math.min((entry.total_points / maxPoints) * 100, 100)}%` }}
                                 />
                             </div>

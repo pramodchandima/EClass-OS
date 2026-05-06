@@ -2,20 +2,10 @@
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
-import {
-    Clock,
-    Plus,
-    Send,
-    CheckCircle2,
-    Trash2,
-    LayoutList,
-    ListPlus,
-    Loader2
-} from 'lucide-react';
+import { Clock, Plus, Send, CheckCircle2, Trash2, LayoutList, ListPlus, Loader2 } from 'lucide-react';
+import toast from 'react-hot-toast';
+import ConfirmModal from '@/components/ConfirmModal';
 
-/**
- * DATA INTERFACES
- */
 interface QuizSet {
     id: string;
     name: string;
@@ -28,10 +18,8 @@ interface Poll {
     id: string;
     question_text: string;
     is_published: boolean;
-    scheduled_for: string;
     correct_option: 'A' | 'B' | 'C' | 'D';
     quiz_set_id: string;
-    quiz_set_name: string;
     order_index: number;
     option_a: string;
     option_b: string;
@@ -50,151 +38,160 @@ interface DraftPoll {
     order_index: number;
 }
 
+const INITIAL_SET_FORM = { name: '', scheduled_at: '' };
+
 /**
- * ADMIN QUIZ MANAGEMENT DASHBOARD
- * Handles batch creation of quiz sets and questions, with automated sequence control.
+ * Admin Quiz Management Dashboard
+ * Handles Quiz Set creation and batch question entry.
  */
 export default function QuizzesPage() {
-    // --- STATE ---
-    const [quizSets, setQuizSets] = useState<QuizSet[]>([]);
-    const [polls, setPolls] = useState<Poll[]>([]);
-    const [loading, setLoading] = useState<boolean | string>(false);
-    const [showCreateSet, setShowCreateSet] = useState(false);
-    const [showBatchEntry, setShowBatchEntry] = useState(false);
-    const [selectedSetId, setSelectedSetId] = useState<string>('');
-
-    const [setFormData, setSetFormData] = useState({
-        name: '',
-        scheduled_at: ''
+    const [quizSets, setQuizSets]         = useState<QuizSet[]>([]);
+    const [polls, setPolls]               = useState<Poll[]>([]);
+    const [loading, setLoading]           = useState<boolean | string>(false);
+    
+    // Confirmation Modal State
+    const [confirmDelete, setConfirmDelete] = useState<{ isOpen: boolean; id: string }>({
+        isOpen: false,
+        id: ''
     });
 
-    const [batchText, setBatchText] = useState('');
+    const [showCreateSet, setShowCreateSet] = useState(false);
+    const [showBatchEntry, setShowBatchEntry] = useState(false);
+    const [selectedSetId, setSelectedSetId] = useState('');
+    const [setFormData, setSetFormData]   = useState(INITIAL_SET_FORM);
+    const [batchText, setBatchText]       = useState('');
 
-    // --- DATA FETCHING ---
+    // Fetch both quiz sets and polls in a single coordinated call
     const fetchData = useCallback(async () => {
         setLoading(true);
         try {
-            const { data: sets } = await supabase
-                .from('quiz_sets')
-                .select('*')
-                .order('scheduled_at', { ascending: false });
-
-            const { data: qls } = await supabase
-                .from('polls')
-                .select('*')
-                .order('order_index', { ascending: true });
-
+            const [{ data: sets }, { data: qls }] = await Promise.all([
+                supabase.from('quiz_sets').select('*').order('scheduled_at', { ascending: false }),
+                supabase.from('polls').select('*').order('order_index', { ascending: true }),
+            ]);
             if (sets) setQuizSets(sets);
-            if (qls) setPolls(qls);
+            if (qls)  setPolls(qls);
         } catch (err) {
-            console.error('Failed to fetch quizzes:', err);
+            console.error('[Quizzes] Fetch error:', err);
         } finally {
             setLoading(false);
         }
     }, []);
 
-    useEffect(() => {
-        fetchData();
-    }, [fetchData]);
+    useEffect(() => { fetchData(); }, [fetchData]);
 
-    // --- PERFORMANCE: POLL GROUPING (O(N)) ---
-    /**
-     * Pre-groups polls by their quiz_set_id to avoid O(N^2) filtering in the render loop.
-     */
+    // Group polls by quiz_set_id in O(N) — avoids O(N²) filter inside render
     const groupedPolls = useMemo(() => {
         const groups: Record<string, Poll[]> = {};
-        polls.forEach(p => {
-            if (!groups[p.quiz_set_id]) groups[p.quiz_set_id] = [];
-            groups[p.quiz_set_id].push(p);
-        });
+        for (const p of polls) {
+            (groups[p.quiz_set_id] ??= []).push(p);
+        }
         return groups;
     }, [polls]);
 
-    // --- ACTIONS ---
     const handleCreateSet = useCallback(async (e: React.FormEvent) => {
         e.preventDefault();
         setLoading(true);
         try {
-            const { error } = await supabase.from('quiz_sets').insert([setFormData]);
-            if (error) {
-                alert(error.message);
+            const res = await fetch('/api/admin/quizzes/manage', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'CREATE_SET', payload: setFormData }),
+            });
+            const data = await res.json();
+            if (!res.ok || !data.ok) {
+                toast.error(data.error || 'Failed to create quiz set');
             } else {
+                toast.success('Quiz set created successfully!');
                 setShowCreateSet(false);
-                setSetFormData({ name: '', scheduled_at: '' });
+                setSetFormData(INITIAL_SET_FORM);
                 fetchData();
             }
+        } catch (err) {
+            console.error('[Quizzes] Create set error:', err);
         } finally {
             setLoading(false);
         }
     }, [setFormData, fetchData]);
 
     /**
-     * Parses raw text into structured poll objects.
-     * Expects: Question \n A) ... \n B) ... \n C) ... \n D) ... \n Correct: A
+     * Parses the batch text format into structured DraftPoll objects.
+     * Format per question:
+     *   Question text
+     *   A) option
+     *   B) option
+     *   C) option
+     *   D) option
+     *   Correct: B
      */
     const handleBatchSubmit = useCallback(async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!selectedSetId) return alert('Please select a Quiz Set first.');
+        if (!selectedSetId) return toast.error('Please select a Quiz Set first.');
         setLoading(true);
 
-        const lines = batchText.split('\n').map(l => l.trim()).filter(l => l !== '');
+        const lines = batchText.split('\n').map(l => l.trim()).filter(Boolean);
         const quizzes: DraftPoll[] = [];
-        let currentQuiz: Partial<DraftPoll> | null = null;
+        let current: Partial<DraftPoll> | null = null;
 
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-
-            // Match Option: A) ...
-            if (line.match(/^[ABCD]\)/i)) {
-                const optKey = line[0].toLowerCase() as 'a' | 'b' | 'c' | 'd';
-                if (currentQuiz) {
-                    currentQuiz[`option_${optKey}`] = line.substring(2).trim();
+        for (const line of lines) {
+            if (/^[ABCD]\)/i.test(line)) {
+                const key = line[0].toLowerCase() as 'a' | 'b' | 'c' | 'd';
+                if (current) current[`option_${key}`] = line.slice(2).trim();
+            } else if (line.toLowerCase().startsWith('correct:')) {
+                if (current) {
+                    current.correct_option = line.split(':')[1].trim().toUpperCase();
+                    const draft: DraftPoll = { ...(current as DraftPoll), quiz_set_id: selectedSetId, order_index: quizzes.length + 1 };
+                    quizzes.push(draft);
+                    current = null;
                 }
-            }
-            // Match Correct Answer: Correct: A
-            else if (line.toLowerCase().startsWith('correct:')) {
-                if (currentQuiz) {
-                    currentQuiz.correct_option = line.split(':')[1].trim().toUpperCase();
-                    quizzes.push({
-                        ...currentQuiz as DraftPoll,
-                        quiz_set_id: selectedSetId,
-                        order_index: quizzes.length + 1
-                    });
-                    currentQuiz = null;
-                }
-            }
-            // Otherwise, it's part of the Question text
-            else {
-                if (!currentQuiz) {
-                    currentQuiz = { question_text: line };
-                } else {
-                    currentQuiz.question_text += ' ' + line;
-                }
+            } else {
+                // Accumulate multi-line question text
+                current = current
+                    ? Object.assign({}, current, { question_text: `${current.question_text} ${line}` })
+                    : { question_text: line };
             }
         }
 
-        if (quizzes.length > 0) {
-            const { error } = await supabase.from('polls').insert(quizzes);
-            if (error) {
-                alert(error.message);
+        try {
+            if (!quizzes.length) {
+                return toast.error('No valid quizzes parsed. Expected format:\nQuestion?\nA) opt\nB) opt\nC) opt\nD) opt\nCorrect: A', { duration: 5000 });
+            }
+            const res = await fetch('/api/admin/quizzes/manage', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'BATCH_INSERT_POLLS', payload: quizzes }),
+            });
+            const data = await res.json();
+            if (!res.ok || !data.ok) {
+                toast.error(data.error || 'Failed to insert quizzes');
             } else {
+                toast.success(`${quizzes.length} quizzes added successfully!`);
                 setShowBatchEntry(false);
                 setBatchText('');
                 fetchData();
             }
-        } else {
-            alert('No valid quizzes found. Check format:\n\nQuestion?\nA) opt\nB) opt\nC) opt\nD) opt\nCorrect: A');
+        } catch (err) {
+            console.error('[Quizzes] Batch submit error:', err);
+        } finally {
+            setLoading(false);
         }
-        setLoading(false);
     }, [selectedSetId, batchText, fetchData]);
 
     const handleDeleteSet = useCallback(async (id: string) => {
-        if (!confirm('Delete this set and all its quizzes?')) return;
         setLoading(true);
         try {
-            const { error } = await supabase.from('quiz_sets').delete().eq('id', id);
-            if (error) alert(error.message);
+            const res = await fetch('/api/admin/quizzes/manage', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'DELETE_SET', payload: { id } }),
+            });
+            const data = await res.json();
+            if (!res.ok || !data.ok) toast.error(data.error || 'Failed to delete set');
+            else toast.success('Quiz set deleted.');
+            setConfirmDelete({ isOpen: false, id: '' });
             fetchData();
+        } catch (err) {
+            console.error('[Quizzes] Delete set error:', err);
         } finally {
             setLoading(false);
         }
@@ -202,8 +199,7 @@ export default function QuizzesPage() {
 
     const handleAutoPlay = useCallback(async (setId: string) => {
         const set = quizSets.find(s => s.id === setId);
-        if (!set) return;
-        if (!confirm(`Start Auto-play for ${set.name}?`)) return;
+        if (!set || !confirm(`Start Auto-play for "${set.name}"?`)) return;
 
         setLoading(setId);
         try {
@@ -213,17 +209,16 @@ export default function QuizzesPage() {
                 body: JSON.stringify({ setId }),
             });
             const data = await res.json();
-            if (data.ok) alert('Quiz Set completed!');
-            else alert('Error: ' + data.error);
-        } catch (err) {
-            alert('Failed to start the sequence.');
+            if (data.ok) toast.success('Quiz sequence started!');
+            else toast.error(`Error: ${data.error}`);
+        } catch {
+            toast.error('Failed to start the sequence. Check your connection.');
         } finally {
             setLoading(false);
             fetchData();
         }
     }, [quizSets, fetchData]);
 
-    // --- RENDER ---
     return (
         <div className="space-y-8">
             {/* HEADER */}
@@ -236,17 +231,11 @@ export default function QuizzesPage() {
                     <p className="text-zinc-500 mt-1">Batch schedule and manage automated quiz sets.</p>
                 </div>
                 <div className="flex gap-4">
-                    <button
-                        onClick={() => setShowBatchEntry(true)}
-                        className="bg-zinc-800 hover:bg-zinc-700 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all active:scale-95"
-                    >
+                    <button onClick={() => setShowBatchEntry(true)} className="bg-zinc-800 hover:bg-zinc-700 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all active:scale-95">
                         <ListPlus size={20} />
                         Batch Entry
                     </button>
-                    <button
-                        onClick={() => setShowCreateSet(true)}
-                        className="bg-orange-600 hover:bg-orange-500 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all active:scale-95 shadow-[0_0_20px_rgba(249,115,22,0.2)]"
-                    >
+                    <button onClick={() => setShowCreateSet(true)} className="bg-orange-600 hover:bg-orange-500 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all active:scale-95 shadow-[0_0_20px_rgba(249,115,22,0.2)]">
                         <Plus size={20} />
                         New Quiz Set
                     </button>
@@ -272,7 +261,7 @@ export default function QuizzesPage() {
                                     className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-orange-500/50"
                                     placeholder="e.g. Physics Weekly 15"
                                     value={setFormData.name}
-                                    onChange={(e) => setSetFormData({ ...setFormData, name: e.target.value })}
+                                    onChange={(e) => setSetFormData(prev => ({ ...prev, name: e.target.value }))}
                                 />
                             </div>
                             <div>
@@ -282,7 +271,7 @@ export default function QuizzesPage() {
                                     required
                                     className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-orange-500/50"
                                     value={setFormData.scheduled_at}
-                                    onChange={(e) => setSetFormData({ ...setFormData, scheduled_at: e.target.value })}
+                                    onChange={(e) => setSetFormData(prev => ({ ...prev, scheduled_at: e.target.value }))}
                                 />
                             </div>
                             <button
@@ -346,8 +335,7 @@ export default function QuizzesPage() {
             {/* QUIZ SET LIST */}
             <div className="space-y-8">
                 {quizSets.map((set) => {
-                    const setPolls = groupedPolls[set.id] || [];
-
+                    const setPolls = groupedPolls[set.id] ?? [];
                     return (
                         <div key={set.id} className="bg-[#111111] border border-zinc-800 rounded-2xl overflow-hidden shadow-lg group hover:border-zinc-700 transition-all">
                             <div className="p-6 bg-zinc-900/50 border-b border-zinc-800 flex justify-between items-center">
@@ -380,8 +368,9 @@ export default function QuizzesPage() {
                                         </button>
                                     )}
                                     <button
-                                        onClick={() => handleDeleteSet(set.id)}
-                                        className="p-2 text-zinc-600 hover:text-red-500 transition-colors"
+                                        onClick={() => setConfirmDelete({ isOpen: true, id: set.id })}
+                                        className="p-2 text-zinc-600 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-all"
+                                        title="Delete Set"
                                     >
                                         <Trash2 size={20} />
                                     </button>
@@ -392,14 +381,10 @@ export default function QuizzesPage() {
                                     <div key={poll.id} className="bg-zinc-900/30 border border-zinc-800 p-4 rounded-xl flex flex-col justify-between">
                                         <div>
                                             <div className="flex justify-between items-start mb-2">
-                                                <span className="text-[10px] font-bold text-zinc-600 uppercase tracking-widest">
-                                                    Q{poll.order_index}
-                                                </span>
+                                                <span className="text-[10px] font-bold text-zinc-600 uppercase tracking-widest">Q{poll.order_index}</span>
                                                 {poll.is_published && <CheckCircle2 size={14} className="text-green-500" />}
                                             </div>
-                                            <h4 className="text-sm font-semibold text-zinc-200 line-clamp-2 mb-2">
-                                                {poll.question_text}
-                                            </h4>
+                                            <h4 className="text-sm font-semibold text-zinc-200 line-clamp-2 mb-2">{poll.question_text}</h4>
                                         </div>
                                         <div className="text-[10px] font-mono text-zinc-500">
                                             Correct: <span className="text-orange-500">{poll.correct_option}</span>
@@ -424,6 +409,17 @@ export default function QuizzesPage() {
                     </div>
                 )}
             </div>
+
+            <ConfirmModal
+                isOpen={confirmDelete.isOpen}
+                title="Delete Quiz Set?"
+                message="This will permanently delete this quiz set and all questions associated with it. This action cannot be reversed."
+                confirmText="Delete Everything"
+                cancelText="Cancel"
+                onConfirm={() => handleDeleteSet(confirmDelete.id)}
+                onCancel={() => setConfirmDelete({ isOpen: false, id: '' })}
+                type="danger"
+            />
         </div>
     );
 }

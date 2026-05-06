@@ -1,89 +1,80 @@
 /**
- * Telegram Message Queue & Rate Limiter
- * Strictly hardcoded to 25 messages per second (1 message every 40ms).
- * Handles 429 Too Many Requests by respecting retry_after.
- * 
- * FIX: Uses recursive setTimeout (tick pattern) to prevent RangeError: Maximum call stack size exceeded.
+ * TELEGRAM MESSAGE QUEUE & RATE LIMITER
+ * Enforces a max of 25 messages/sec (one task every 40ms).
+ * Handles 429 "Too Many Requests" by respecting `retry_after`.
+ * Uses recursive setTimeout (tick pattern) to prevent call-stack overflows.
  */
 
-type QueueTask = {
-    fn: () => Promise<any>;
-    resolve: (val: any) => void;
-    reject: (err: any) => void;
+type QueueTask<T = unknown> = {
+    fn: () => Promise<T>;
+    resolve: (val: T) => void;
+    reject: (err: unknown) => void;
 };
 
 class TelegramQueue {
-    private queue: QueueTask[] = [];
-    private isProcessing: boolean = false;
-    private pauseUntil: number = 0;
-    private readonly msBetweenTasks = 40; // 1000ms / 25 = 40ms
+    private readonly queue: QueueTask[] = [];
+    private isProcessing = false;
+    private pauseUntil = 0;
+    private readonly msBetweenTasks = 40; // 1000ms / 25 msgs = 40ms
 
     constructor() {
         this.start();
     }
 
-    private start() {
+    private start(): void {
         if (this.isProcessing) return;
         this.isProcessing = true;
         this.tick();
     }
 
-    /**
-     * Add a task to the queue
-     */
-    async enqueue<T>(fn: () => Promise<T>): Promise<T> {
-        return new Promise((resolve, reject) => {
-            this.queue.push({ fn, resolve, reject });
+    /** Enqueue a task and return a promise that resolves with its result. */
+    enqueue<T>(fn: () => Promise<T>): Promise<T> {
+        return new Promise<T>((resolve, reject) => {
+            this.queue.push({ fn, resolve: resolve as (val: unknown) => void, reject });
         });
     }
 
     /**
-     * The background tick processing the queue.
-     * Uses setTimeout to clear the call stack and prevent recursion overflows.
+     * Background processor. Uses setTimeout instead of recursion to
+     * prevent RangeError on deep call stacks.
      */
-    private async tick() {
+    private tick(): void {
         try {
-            // 1. Check if we are paused (429 handling)
             const now = Date.now();
+
+            // Respect 429 back-off period
             if (now < this.pauseUntil) {
                 setTimeout(() => this.tick(), Math.max(10, this.pauseUntil - now));
                 return;
             }
 
-            // 2. Get next task
             const task = this.queue.shift();
             if (!task) {
-                setTimeout(() => this.tick(), 100); // Sleep if empty
+                setTimeout(() => this.tick(), 100); // idle sleep
                 return;
             }
 
-            // 3. Execute task
-            try {
-                const result = await task.fn();
-                task.resolve(result);
-            } catch (error: any) {
-                // If 429, retry and pause
-                if (error?.response?.body?.error_code === 429) {
-                    const retryAfter = (error.response.body.parameters?.retry_after ?? 1) * 1000;
-                    console.warn(`[TelegramQueue] 429 Detected. Pausing for ${retryAfter}ms`);
-
+            // Execute and handle potential 429 errors
+            task.fn().then(task.resolve).catch((error: unknown) => {
+                const body = (error as { response?: { body?: { error_code?: number; parameters?: { retry_after?: number } } } })?.response?.body;
+                if (body?.error_code === 429) {
+                    const retryAfter = (body.parameters?.retry_after ?? 1) * 1000;
+                    console.warn(`[TelegramQueue] Rate limited. Retrying after ${retryAfter}ms.`);
                     this.pauseUntil = Date.now() + retryAfter;
-                    this.queue.unshift(task); // Put it back at the front
+                    this.queue.unshift(task); // re-queue at the front
                 } else {
                     task.reject(error);
                 }
-            }
-
-            // 4. Schedule next tick with rate limit delay
-            setTimeout(() => this.tick(), this.msBetweenTasks);
+            }).finally(() => {
+                setTimeout(() => this.tick(), this.msBetweenTasks);
+            });
 
         } catch (fatalError) {
-            console.error('[TelegramQueue] Critical Tick Error:', fatalError);
-            // Ensure the loop continues even on unexpected errors
-            setTimeout(() => this.tick(), 1000);
+            console.error('[TelegramQueue] Fatal tick error:', fatalError);
+            setTimeout(() => this.tick(), 1000); // recover and continue
         }
     }
 }
 
-// Singleton Queue
+/** Singleton instance shared across the server process. */
 export const telegramQueue = new TelegramQueue();

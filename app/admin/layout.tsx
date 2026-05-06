@@ -3,7 +3,7 @@
 import { useMemo } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Users, BookOpen, Clock, LayoutDashboard, Trophy, LucideIcon } from 'lucide-react';
+import { Users, BookOpen, Clock, LayoutDashboard, Trophy, LucideIcon, LogOut } from 'lucide-react';
 
 /**
  * NAVIGATION INTERFACES
@@ -63,11 +63,21 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                 </nav>
 
                 {/* FOOTER: ACCOUNT INFO */}
-                <div className="mt-auto pt-6 border-t border-zinc-800">
+                <div className="mt-auto pt-6 border-t border-zinc-800 space-y-3">
                     <div className="px-4 py-3 bg-zinc-900/50 rounded-xl border border-zinc-800/50">
                         <p className="text-[10px] text-zinc-500 uppercase font-black tracking-widest mb-1">Authenticated</p>
                         <p className="text-sm font-bold text-zinc-300">Administrator</p>
                     </div>
+                    <button 
+                        onClick={() => {
+                            document.cookie = 'admin_password=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+                            window.location.href = '/admin/login';
+                        }}
+                        className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl transition-all text-sm font-semibold border border-red-500/20 active:scale-[0.98]"
+                    >
+                        <LogOut size={16} />
+                        Sign Out
+                    </button>
                 </div>
             </aside>
 

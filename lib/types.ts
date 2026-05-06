@@ -20,8 +20,8 @@ export interface LeaderboardEntry {
 
 export interface QuizSet {
     id: string;
-    name: string; // Internal name
-    title: string; // Display title
+    name: string;
+    title: string;
     description?: string;
     status: 'draft' | 'scheduled' | 'ongoing' | 'completed';
     scheduled_at?: string;
@@ -79,4 +79,26 @@ export interface TelegramWebhookPayload {
             date: number;
         };
     };
+}
+
+// ─── Telegram WebApp (Browser Global) ─────────────────────────────────────────
+
+export interface TelegramWebApp {
+    ready: () => void;
+    expand: () => void;
+    close: () => void;
+    initDataUnsafe?: {
+        user?: {
+            id: number;
+            first_name?: string;
+            last_name?: string;
+            username?: string;
+        };
+    };
+}
+
+declare global {
+    interface Window {
+        Telegram?: { WebApp?: TelegramWebApp };
+    }
 }

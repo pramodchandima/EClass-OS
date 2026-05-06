@@ -3,10 +3,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { BookOpen, Upload, Trash2, FileText, Plus, X } from 'lucide-react';
+import toast from 'react-hot-toast';
+import ConfirmModal from '@/components/ConfirmModal';
 
-/**
- * DATA INTERFACES
- */
 interface Material {
     id: string;
     title: string;
@@ -15,34 +14,35 @@ interface Material {
     created_at: string;
 }
 
-/**
- * HELPER: GOOGLE DRIVE LINK CONVERTER
- * Converts a standard 'share' link into a 'direct download' link 
- * for compatibility with PDF viewers and downloaders.
- */
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+
+/** Converts a Google Drive share URL to a direct-download URL. */
 function convertDriveLink(url: string): string {
     const match = url.match(/\/d\/([\w-]+)/);
-    if (match && match[1]) {
-        return `https://drive.google.com/uc?export=download&id=${match[1]}`;
-    }
-    return url;
+    return match?.[1]
+        ? `https://drive.google.com/uc?export=download&id=${match[1]}`
+        : url;
 }
 
 /**
- * MATERIALS LIBRARY PAGE
- * Manages educational PDF resources, supporting both direct uploads to 
- * Supabase Storage and external Google Drive links.
+ * Materials Library Page
+ * Supports both direct Supabase Storage uploads and external Google Drive links.
  */
 export default function MaterialsPage() {
-    // --- STATE ---
-    const [materials, setMaterials] = useState<Material[]>([]);
-    const [loading, setLoading] = useState(false);
-    const [showUpload, setShowUpload] = useState(false);
-    const [newMaterial, setNewMaterial] = useState({ title: '', category: '' });
-    const [file, setFile] = useState<File | null>(null);
-    const [driveUrl, setDriveUrl] = useState('');
+    const [materials, setMaterials]         = useState<Material[]>([]);
+    const [loading, setLoading]             = useState(true);
 
-    // --- DATA FETCHING ---
+    // Confirmation Modal State
+    const [confirmDelete, setConfirmDelete] = useState<{ isOpen: boolean; id: string; url: string }>({
+        isOpen: false,
+        id: '',
+        url: ''
+    });
+    const [showUpload, setShowUpload]       = useState(false);
+    const [newMaterial, setNewMaterial]     = useState({ title: '', category: '' });
+    const [file, setFile]                   = useState<File | null>(null);
+    const [driveUrl, setDriveUrl]           = useState('');
+
     const fetchMaterials = useCallback(async () => {
         try {
             const { data, error } = await supabase
@@ -50,124 +50,94 @@ export default function MaterialsPage() {
                 .select('*')
                 .order('created_at', { ascending: false });
 
-            if (!error && data) {
-                setMaterials(data);
-            }
+            if (error) console.error('[Materials] Fetch error:', error);
+            else if (data) setMaterials(data);
         } catch (err) {
-            console.error('[Materials] Fetch Error:', err);
+            console.error('[Materials] Unexpected error:', err);
+        } finally {
+            setLoading(false);
         }
     }, []);
 
-    useEffect(() => {
-        fetchMaterials();
-    }, [fetchMaterials]);
+    useEffect(() => { fetchMaterials(); }, [fetchMaterials]);
 
-    // --- ACTIONS ---
-    /**
-     * Handles both local file upload and Drive link submission.
-     * Enforces file size (10MB) and type (PDF) restrictions.
-     */
+    /** Resets the upload modal form to its initial state. */
+    const resetForm = useCallback(() => {
+        setNewMaterial({ title: '', category: '' });
+        setFile(null);
+        setDriveUrl('');
+        setShowUpload(false);
+    }, []);
+
     const handleUpload = useCallback(async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!newMaterial.title || !newMaterial.category) {
-            return alert('Please fill title and category');
-        }
-        if (!file && !driveUrl) {
-            return alert('Please upload a file or provide a Google Drive link');
-        }
+        if (!newMaterial.title || !newMaterial.category) return toast.error('Please fill in title and category.');
+        if (!file && !driveUrl)                            return toast.error('Please upload a file or provide a Google Drive link.');
 
         setLoading(true);
-        let finalUrl = '';
-
         try {
-            if (file) {
-                // 1. Hardened File Restrictions
-                const MAX_SIZE = 10 * 1024 * 1024; // 10MB
-                if (file.size > MAX_SIZE) {
-                    alert('File is too large! Maximum size allowed is 10MB.');
-                    setLoading(false);
-                    return;
-                }
-
-                if (file.type !== 'application/pdf') {
-                    alert('Only PDF files are allowed!');
-                    setLoading(false);
-                    return;
-                }
-
-                // 2. Generate Unique File Path
-                const fileExt = file.name.split('.').pop();
-                const fileName = `${crypto.randomUUID()}.${fileExt}`;
-                const filePath = `materials/${fileName}`;
-
-                // 3. Upload to Supabase Storage
-                const { error: uploadError } = await supabase.storage
-                    .from('materials')
-                    .upload(filePath, file);
-
-                if (uploadError) {
-                    alert('Error uploading file: ' + uploadError.message);
-                    setLoading(false);
-                    return;
-                }
-
-                const { data: { publicUrl } } = supabase.storage
-                    .from('materials')
-                    .getPublicUrl(filePath);
-
-                finalUrl = publicUrl;
-            } else if (driveUrl) {
-                finalUrl = convertDriveLink(driveUrl);
+            if (file && file.size > MAX_FILE_SIZE) {
+                setLoading(false);
+                return toast.error('File exceeds the 10 MB limit.');
+            }
+            if (file && file.type !== 'application/pdf') {
+                setLoading(false);
+                return toast.error('Only PDF files are allowed.');
             }
 
-            // 4. Save Metadata to Database
-            const { error: dbError } = await supabase.from('materials').insert([
-                {
-                    title: newMaterial.title,
-                    category: newMaterial.category,
-                    file_url: finalUrl
-                }
-            ]);
+            const formData = new FormData();
+            formData.append('title', newMaterial.title);
+            formData.append('category', newMaterial.category);
+            if (file) formData.append('file', file);
+            if (driveUrl) formData.append('driveUrl', driveUrl);
 
-            if (dbError) {
-                alert('Error saving to database: ' + dbError.message);
+            const res = await fetch('/api/admin/materials/upload', {
+                method: 'POST',
+                body: formData,
+            });
+
+            const data = await res.json();
+
+            if (!res.ok || !data.ok) {
+                toast.error(data.error || 'Upload failed');
             } else {
-                setShowUpload(false);
-                setNewMaterial({ title: '', category: '' });
-                setFile(null);
-                setDriveUrl('');
+                toast.success('Material uploaded successfully!');
+                resetForm();
                 fetchMaterials();
             }
         } catch (err) {
-            console.error('[Materials] Upload Error:', err);
+            console.error('[Materials] Upload error:', err);
+            toast.error('An unexpected error occurred. Please try again.');
         } finally {
             setLoading(false);
         }
-    }, [newMaterial, file, driveUrl, fetchMaterials]);
+    }, [newMaterial, file, driveUrl, fetchMaterials, resetForm]);
 
     const deleteMaterial = useCallback(async (id: string, url: string) => {
-        if (!confirm('Are you sure you want to delete this material?')) return;
-
         setLoading(true);
+        setConfirmDelete({ isOpen: false, id: '', url: '' });
         try {
-            // Attempt to delete from storage if it's a Supabase hosted file
-            if (url.includes('/storage/v1/object/public/')) {
-                const urlParts = url.split('/');
-                const fileName = urlParts[urlParts.length - 1];
-                await supabase.storage.from('materials').remove([`materials/${fileName}`]);
+            const res = await fetch('/api/admin/materials/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id, url }),
+            });
+
+            const data = await res.json();
+            if (!res.ok || !data.ok) {
+                console.error('[Materials] Delete error:', data.error);
+                toast.error(data.error || 'Failed to delete material.');
+            } else {
+                toast.success('Material deleted.');
+                fetchMaterials();
             }
-
-            // Delete from Database
-            const { error } = await supabase.from('materials').delete().eq('id', id);
-            if (error) alert(error.message);
-
-            fetchMaterials();
+        } catch (err) {
+            console.error('[Materials] Unexpected delete error:', err);
         } finally {
             setLoading(false);
         }
     }, [fetchMaterials]);
 
-    // --- RENDER ---
     return (
         <div className="space-y-8 relative">
             {/* HEADER */}
@@ -194,7 +164,7 @@ export default function MaterialsPage() {
                     <div className="bg-[#111111] border border-zinc-800 w-full max-w-lg rounded-2xl overflow-hidden shadow-2xl">
                         <div className="p-6 border-b border-zinc-800 flex justify-between items-center">
                             <h3 className="text-xl font-bold text-white">Upload New Material</h3>
-                            <button onClick={() => setShowUpload(false)} className="text-zinc-500 hover:text-white transition-colors">
+                            <button onClick={resetForm} className="text-zinc-500 hover:text-white transition-colors">
                                 <X size={24} />
                             </button>
                         </div>
@@ -207,7 +177,7 @@ export default function MaterialsPage() {
                                     className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50"
                                     placeholder="e.g. Mechanics - Lesson 01"
                                     value={newMaterial.title}
-                                    onChange={(e) => setNewMaterial({ ...newMaterial, title: e.target.value })}
+                                    onChange={(e) => setNewMaterial(prev => ({ ...prev, title: e.target.value }))}
                                 />
                             </div>
                             <div>
@@ -218,7 +188,7 @@ export default function MaterialsPage() {
                                     className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50"
                                     placeholder="e.g. Physics"
                                     value={newMaterial.category}
-                                    onChange={(e) => setNewMaterial({ ...newMaterial, category: e.target.value })}
+                                    onChange={(e) => setNewMaterial(prev => ({ ...prev, category: e.target.value }))}
                                 />
                             </div>
                             <div className="border-2 border-dashed border-zinc-800 rounded-2xl p-8 text-center hover:border-blue-500/50 transition-all group">
@@ -228,7 +198,7 @@ export default function MaterialsPage() {
                                     className="hidden"
                                     id="file-upload"
                                     disabled={!!driveUrl}
-                                    onChange={(e) => setFile(e.target.files?.[0] || null)}
+                                    onChange={(e) => setFile(e.target.files?.[0] ?? null)}
                                 />
                                 <label htmlFor="file-upload" className={`cursor-pointer ${driveUrl ? 'opacity-20 cursor-not-allowed' : ''}`}>
                                     <Upload className="mx-auto text-zinc-600 mb-4 group-hover:text-blue-500 transition-colors" size={48} />
@@ -237,9 +207,9 @@ export default function MaterialsPage() {
                             </div>
 
                             <div className="relative flex items-center gap-4">
-                                <div className="flex-1 h-px bg-zinc-800"></div>
+                                <div className="flex-1 h-px bg-zinc-800" />
                                 <span className="text-[10px] font-bold text-zinc-600 uppercase tracking-[0.2em]">OR</span>
-                                <div className="flex-1 h-px bg-zinc-800"></div>
+                                <div className="flex-1 h-px bg-zinc-800" />
                             </div>
 
                             <div>
@@ -252,7 +222,7 @@ export default function MaterialsPage() {
                                     value={driveUrl}
                                     onChange={(e) => setDriveUrl(e.target.value)}
                                 />
-                                <p className="text-[10px] text-zinc-500 mt-2">Make sure the file is shared as <b>"Anyone with the link"</b>.</p>
+                                <p className="text-[10px] text-zinc-500 mt-2">Make sure the file is shared as <b>&quot;Anyone with the link&quot;</b>.</p>
                             </div>
 
                             <button
@@ -276,8 +246,9 @@ export default function MaterialsPage() {
                                 <FileText size={24} />
                             </div>
                             <button
-                                onClick={() => deleteMaterial(m.id, m.file_url)}
-                                className="text-zinc-600 hover:text-red-500 transition-colors p-2"
+                                onClick={() => setConfirmDelete({ isOpen: true, id: m.id, url: m.file_url })}
+                                className="p-2 text-zinc-600 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-all"
+                                title="Delete Material"
                             >
                                 <Trash2 size={18} />
                             </button>
@@ -290,12 +261,7 @@ export default function MaterialsPage() {
                         </span>
                         <div className="mt-4 pt-4 border-t border-zinc-800/50 flex justify-between items-center">
                             <p className="text-xs text-zinc-500">{new Date(m.created_at).toLocaleDateString()}</p>
-                            <a
-                                href={m.file_url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-xs font-bold text-blue-500 hover:underline"
-                            >
+                            <a href={m.file_url} target="_blank" rel="noopener noreferrer" className="text-xs font-bold text-blue-500 hover:underline">
                                 View PDF
                             </a>
                         </div>
@@ -311,6 +277,17 @@ export default function MaterialsPage() {
                     </div>
                 )}
             </div>
+
+            <ConfirmModal
+                isOpen={confirmDelete.isOpen}
+                title="Delete Study Material?"
+                message="This action will permanently remove this document from the database and storage. This cannot be undone."
+                confirmText="Delete Permanently"
+                cancelText="Keep Document"
+                onConfirm={() => deleteMaterial(confirmDelete.id, confirmDelete.url)}
+                onCancel={() => setConfirmDelete({ ...confirmDelete, isOpen: false })}
+                type="danger"
+            />
         </div>
     );
 }

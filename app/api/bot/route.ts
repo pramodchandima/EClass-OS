@@ -4,16 +4,12 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { watermarkPdf } from '@/lib/pdf';
 import { generateAnswerKey } from '@/lib/pdfGenerator';
 
-/**
- * CONFIGURATION
- * ADMIN_ID: The Telegram User ID authorized to perform administrative actions.
- */
+/** Telegram User ID with admin privileges (matches the channel owner). */
 const ADMIN_ID = 1003716070013;
 
-/**
- * INTERNAL TYPES
- */
-interface Poll {
+// ─── Internal Types ────────────────────────────────────────────────────────────
+
+interface DbPoll {
     id: string;
     question_text: string;
     option_a: string;
@@ -25,385 +21,352 @@ interface Poll {
     order_index: number;
 }
 
-interface Student {
+interface DbStudent {
     id: number;
     telegram_id: number;
     full_name: string;
     phone_number: string;
 }
 
-interface QuizSet {
-    id: string;
-    title: string;
-}
+// ─── Core Quiz Engine ──────────────────────────────────────────────────────────
 
 /**
- * SEQUENTIAL QUIZ ENGINE: SEND NEXT QUESTION
- * This core engine handles the automated flow of questions for a student.
- * 
- * @param telegramId - User's Telegram ID for messaging
- * @param studentDbId - Student's internal Database ID for records
- * @param quizSetId - ID of the Quiz Set being attempted
+ * Sends the next unanswered question in a quiz set to a student.
+ * Sends a completion summary when all questions have been answered.
  */
 async function sendNextQuestion(telegramId: number, studentDbId: number, quizSetId: string): Promise<void> {
     try {
-        // 1. Retrieve Quiz Set Context
-        const { data: setInfo } = await supabaseAdmin
-            .from('quiz_sets')
-            .select('name')
-            .eq('id', quizSetId)
-            .single();
-        const setTitle = setInfo?.name || 'Current Quiz';
-
-        // 2. Fetch all questions in the set, ordered by index
-        const { data: polls } = await supabaseAdmin
-            .from('polls')
-            .select('*')
-            .eq('quiz_set_id', quizSetId)
-            .order('order_index', { ascending: true });
+        // Fetch set name and all questions in parallel
+        const [{ data: setInfo }, { data: polls }] = await Promise.all([
+            supabaseAdmin.from('quiz_sets').select('name').eq('id', quizSetId).single(),
+            supabaseAdmin.from('polls').select('*').eq('quiz_set_id', quizSetId).order('order_index', { ascending: true }),
+        ]);
 
         if (!polls || polls.length === 0) {
-            console.warn(`[Bot] Quiz Set ${quizSetId} empty or not found.`);
+            console.warn(`[Bot] Quiz Set ${quizSetId} is empty or not found.`);
             return;
         }
 
-        // 3. Determine progress by counting existing answers
+        const setTitle = setInfo?.name ?? 'Current Quiz';
+        const typedPolls = polls as DbPoll[];
+
+        // Count already-answered questions for this student
         const { data: answered } = await supabaseAdmin
             .from('poll_answers')
             .select('poll_id')
             .eq('student_id', studentDbId)
-            .in('poll_id', polls.map(p => p.id));
+            .in('poll_id', typedPolls.map(p => p.id));
 
-        const answeredIds = answered?.map(a => a.poll_id) || [];
-        const nextPoll = (polls as Poll[]).find(p => !answeredIds.includes(p.id));
+        const answeredIds = new Set(answered?.map(a => a.poll_id) ?? []);
+        const nextPoll = typedPolls.find(p => !answeredIds.has(p.id));
 
-        // 4. Handle Quiz Completion
+        // ── Quiz Completed ───────────────────────────────────────────────────
         if (!nextPoll) {
             const { data: sessionAnswers } = await supabaseAdmin
                 .from('poll_answers')
                 .select('earned_points, selected_option, poll_id')
-                .in('poll_id', polls.map(p => p.id))
+                .in('poll_id', typedPolls.map(p => p.id))
                 .eq('student_id', studentDbId);
 
             let correctCount = 0;
-            let totalSetPoints = 0;
+            let totalPoints = 0;
 
-            sessionAnswers?.forEach(ans => {
-                const poll = (polls as Poll[]).find(p => p.id === ans.poll_id);
-                if (poll && ans.selected_option === poll.correct_option) {
-                    correctCount++;
-                }
-                totalSetPoints += ans.earned_points;
-            });
+            for (const ans of sessionAnswers ?? []) {
+                const poll = typedPolls.find(p => p.id === ans.poll_id);
+                if (poll && ans.selected_option === poll.correct_option) correctCount++;
+                totalPoints += ans.earned_points;
+            }
 
-            const summary = `🏁 *QUIZ COMPLETED!* 🏁\n\n` +
+            await bot.sendMessage(telegramId,
+                `🏁 *QUIZ COMPLETED!* 🏁\n\n` +
                 `📂 Topic: *${setTitle}*\n` +
-                `✅ Correct Answers: *${correctCount} / ${polls.length}*\n` +
-                `💎 Points Earned: *${totalSetPoints} pts*\n\n` +
-                `🌟 Great job! The Top 3 Winners will be announced in the channel shortly! 🚀`;
-
-            await bot.sendMessage(telegramId, summary, { parse_mode: 'Markdown' });
+                `✅ Correct Answers: *${correctCount} / ${typedPolls.length}*\n` +
+                `💎 Points Earned: *${totalPoints} pts*\n\n` +
+                `🌟 Great job! The Top 3 Winners will be announced in the channel shortly! 🚀`,
+                { parse_mode: 'Markdown' }
+            );
             return;
         }
 
-        // 5. Deliver the next question via Inline Keyboard
-        const currentProgress = answeredIds.length + 1;
-        const qHeader = `📊 *QUESTION ${currentProgress}/${polls.length}* 📊\n\n`;
-        const qBody = `❓ *${nextPoll.question_text}*`;
-
-        await bot.sendMessage(telegramId, qHeader + qBody, {
-            parse_mode: 'Markdown',
-            reply_markup: {
-                inline_keyboard: [
-                    [{ text: `🔘 A) ${nextPoll.option_a}`.padEnd(60) + "⠀", callback_data: `ans:${nextPoll.id}:A` }],
-                    [{ text: `🔘 B) ${nextPoll.option_b}`.padEnd(60) + "⠀", callback_data: `ans:${nextPoll.id}:B` }],
-                    [{ text: `🔘 C) ${nextPoll.option_c}`.padEnd(60) + "⠀", callback_data: `ans:${nextPoll.id}:C` }],
-                    [{ text: `🔘 D) ${nextPoll.option_d}`.padEnd(60) + "⠀", callback_data: `ans:${nextPoll.id}:D` }]
-                ]
+        // ── Send Next Question ───────────────────────────────────────────────
+        const currentProgress = answeredIds.size + 1;
+        await bot.sendMessage(
+            telegramId,
+            `📊 *QUESTION ${currentProgress}/${typedPolls.length}* 📊\n\n❓ *${nextPoll.question_text}*`,
+            {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: `🔘 A) ${nextPoll.option_a}`.padEnd(60) + '⠀', callback_data: `ans:${nextPoll.id}:A` }],
+                        [{ text: `🔘 B) ${nextPoll.option_b}`.padEnd(60) + '⠀', callback_data: `ans:${nextPoll.id}:B` }],
+                        [{ text: `🔘 C) ${nextPoll.option_c}`.padEnd(60) + '⠀', callback_data: `ans:${nextPoll.id}:C` }],
+                        [{ text: `🔘 D) ${nextPoll.option_d}`.padEnd(60) + '⠀', callback_data: `ans:${nextPoll.id}:D` }],
+                    ],
+                },
             }
-        });
+        );
     } catch (err) {
-        console.error('[Bot Engine] Critical Error in sendNextQuestion:', err);
+        console.error('[Bot Engine] sendNextQuestion error:', err);
     }
 }
 
-/**
- * MASTER WEBHOOK HANDLER
- * Processes all incoming Telegram events (Messages, Callbacks, Commands).
- */
+// ─── Webhook Handler ───────────────────────────────────────────────────────────
+
+/** Processes all incoming Telegram events (messages, commands, callback queries). */
 export async function POST(req: NextRequest) {
     try {
         const body = await req.json();
 
-        // 🟢 ROUTE 1: INCOMING MESSAGES
+        // ── Incoming Message ─────────────────────────────────────────────────
         if (body.message) {
-            const { chat, text, from } = body.message;
-            const tid = from.id;
+            const { chat, text, from } = body.message as {
+                chat: { id: number };
+                text?: string;
+                from: { id: number };
+            };
+            const tid: number = from.id;
 
-            // --- COMMAND: /start or Restart ---
+            // /start or 🔄 Restart
             if (text === '🔄 Restart' || text?.startsWith('/start')) {
-                const payload = text?.startsWith('/start') ? text.split(' ')[1] : null;
-                const { data: student } = await supabaseAdmin
-                    .from('students')
-                    .select('*')
-                    .eq('telegram_id', tid)
-                    .single();
+                const payload = text.startsWith('/start') ? text.split(' ')[1] : null;
+                const { data: student } = await supabaseAdmin.from('students').select('*').eq('telegram_id', tid).single();
 
-                // 1. Unauthorized Access -> Force Registration
                 if (!student) {
-                    await bot.sendMessage(chat.id, "Welcome to E-Class! 🎓\nPlease register to join quizzes.", {
+                    await bot.sendMessage(chat.id, 'Welcome to E-Class! 🎓\nPlease register to join quizzes.', {
                         reply_markup: {
                             inline_keyboard: [[{
-                                text: "📝 Register Now",
-                                web_app: { url: `${process.env.NEXT_PUBLIC_APP_URL}/register?tid=${tid}` }
-                            }]]
-                        }
+                                text: '📝 Register Now',
+                                web_app: { url: `${process.env.NEXT_PUBLIC_APP_URL}/register?tid=${tid}` },
+                            }]],
+                        },
                     });
                     return NextResponse.json({ ok: true });
                 }
 
-                // 2. Sequential Deep Link Initiation: /start quizset_{setId}
                 if (payload?.startsWith('quizset_')) {
                     const setId = payload.replace('quizset_', '');
-                    await bot.sendMessage(chat.id, `🚀 *Initializing Session...* 🚀`, { parse_mode: 'Markdown' });
+                    await bot.sendMessage(chat.id, '🚀 *Initializing Session...* 🚀', { parse_mode: 'Markdown' });
                     await sendNextQuestion(tid, student.id, setId);
                     return NextResponse.json({ ok: true });
                 }
 
-                // 3. Default Greeting
-                await bot.sendMessage(chat.id, `Welcome back, ${student.full_name}! 👋\nUse the buttons below to navigate.`, {
+                await bot.sendMessage(chat.id, `Welcome back, ${(student as DbStudent).full_name}! 👋\nUse the buttons below to navigate.`, {
                     reply_markup: {
-                        keyboard: [
-                            [{ text: '👤 My Profile' }, { text: '📚 Tutes' }],
-                            [{ text: '🔄 Restart' }]
-                        ],
-                        resize_keyboard: true
-                    }
+                        keyboard: [[{ text: '👤 My Profile' }, { text: '📚 Tutes' }], [{ text: '🔄 Restart' }]],
+                        resize_keyboard: true,
+                    },
                 });
                 return NextResponse.json({ ok: true });
             }
 
-            // --- ADMIN COMMAND: /publish_pdf [setId] ---
+            // /publish_pdf [setId]  — admin only
             if (text?.startsWith('/publish_pdf') && tid === ADMIN_ID) {
                 const setId = text.split(' ')[1];
                 if (!setId) {
-                    await bot.sendMessage(chat.id, "❌ Usage: `/publish_pdf {quiz_set_id}`", { parse_mode: 'Markdown' });
+                    await bot.sendMessage(chat.id, '❌ Usage: `/publish_pdf {quiz_set_id}`', { parse_mode: 'Markdown' });
                     return NextResponse.json({ ok: true });
                 }
 
-                await bot.sendMessage(chat.id, "⏳ Generating Answer Key PDF...");
+                await bot.sendMessage(chat.id, '⏳ Generating Answer Key PDF...');
 
-                // 1. Data Retrieval
-                const { data: set } = await supabaseAdmin.from('quiz_sets').select('name').eq('id', setId).single();
-                const { data: polls } = await supabaseAdmin.from('polls').select('*').eq('quiz_set_id', setId).order('order_index', { ascending: true });
+                const [{ data: set }, { data: polls }] = await Promise.all([
+                    supabaseAdmin.from('quiz_sets').select('name').eq('id', setId).single(),
+                    supabaseAdmin.from('polls').select('*').eq('quiz_set_id', setId).order('order_index', { ascending: true }),
+                ]);
 
-                if (!set || !polls || polls.length === 0) {
-                    await bot.sendMessage(chat.id, "❌ Quiz Set not found or has no questions.");
+                if (!set || !polls?.length) {
+                    await bot.sendMessage(chat.id, '❌ Quiz Set not found or has no questions.');
                     return NextResponse.json({ ok: true });
                 }
 
-                // 2. Bilingual PDF Synthesis
-                const pdfBuffer = await generateAnswerKey(set.name, polls);
-
-                // 3. Official Channel Broadcast
+                const pdfBuffer = await generateAnswerKey(set.name, polls as DbPoll[]);
                 const channelId = process.env.TELEGRAM_CHANNEL_ID!;
+
                 await bot.sendDocument(channelId, pdfBuffer, {
                     caption: `📚 *ANSWER KEY & REVIEW SHEET*\n\nTopic: *${set.name}*\nQuestions: *${polls.length}*\n\nUse this to review your performance! 🎓💎`,
-                    parse_mode: 'Markdown'
+                    parse_mode: 'Markdown',
                 }, { filename: `${set.name}_Answer_Key.pdf` });
 
-                await bot.sendMessage(chat.id, "✅ PDF Answer Key published successfully!");
+                await bot.sendMessage(chat.id, '✅ PDF Answer Key published successfully!');
                 return NextResponse.json({ ok: true });
             }
 
-            // --- COMMAND: Profile View ---
+            // 👤 My Profile
             if (text === '👤 My Profile') {
                 const { data: lb } = await supabaseAdmin.from('leaderboard').select('*').eq('telegram_id', tid).single();
                 if (lb) {
-                    const profileMsg = `👤 *PROFILE*\n\nName: ${lb.full_name}\nPoints: ${lb.total_points} pts\nTelegram ID: ${tid}`;
-                    await bot.sendMessage(chat.id, profileMsg, { parse_mode: 'Markdown' });
+                    await bot.sendMessage(chat.id,
+                        `👤 *PROFILE*\n\nName: ${lb.full_name}\nPoints: ${lb.total_points} pts\nTelegram ID: ${tid}`,
+                        { parse_mode: 'Markdown' }
+                    );
                 }
                 return NextResponse.json({ ok: true });
             }
 
-            // --- COMMAND: Materials Library (Tutes) ---
+            // 📚 Tutes — browse material categories
             if (text === '📚 Tutes') {
                 const { data: categories } = await supabaseAdmin.from('materials').select('category');
-                const uniqueCats = Array.from(new Set(categories?.map(c => c.category) || []));
+                const uniqueCats = [...new Set(categories?.map(c => c.category) ?? [])];
 
-                if (uniqueCats.length === 0) {
-                    await bot.sendMessage(chat.id, "📭 Currently no educational materials available.");
+                if (!uniqueCats.length) {
+                    await bot.sendMessage(chat.id, '📭 Currently no educational materials available.');
                     return NextResponse.json({ ok: true });
                 }
 
-                const kb = uniqueCats.map(cat => ([{ text: `📁 ${cat}`, callback_data: `cat:${cat}` }]));
-                await bot.sendMessage(chat.id, "📚 *MATERIALS LIBRARY*\n\nSelect a subject to browse tutes:", {
+                await bot.sendMessage(chat.id, '📚 *MATERIALS LIBRARY*\n\nSelect a subject to browse tutes:', {
                     parse_mode: 'Markdown',
-                    reply_markup: { inline_keyboard: kb }
+                    reply_markup: { inline_keyboard: uniqueCats.map(cat => [{ text: `📁 ${cat}`, callback_data: `cat:${cat}` }]) },
                 });
                 return NextResponse.json({ ok: true });
             }
         }
 
-        // 🟠 ROUTE 2: CALLBACK QUERIES (Buttons)
+        // ── Callback Query (Inline Button Press) ─────────────────────────────
         if (body.callback_query) {
-            const { id, data, message, from } = body.callback_query;
-            const tid = from.id;
+            const { id, data, message, from } = body.callback_query as {
+                id: string;
+                data?: string;
+                from: { id: number };
+                message?: { chat: { id: number }; message_id: number; date: number };
+            };
+
             if (!data || !message) return NextResponse.json({ ok: true });
+            const tid: number = from.id;
 
-            // --- ACTION: QUIZ ANSWER SUBMISSION ---
+            // ── Answer Submission ─────────────────────────────────────────────
             if (data.startsWith('ans:')) {
-                const [_, pollId, choice] = data.split(':');
+                const [, pollId, choice] = data.split(':');
 
-                // 1. Data Integrity Check
-                const { data: poll } = await supabaseAdmin.from('polls').select('*').eq('id', pollId).single();
-                const { data: student } = await supabaseAdmin.from('students').select('*').eq('telegram_id', tid).single();
+                const [{ data: poll }, { data: student }] = await Promise.all([
+                    supabaseAdmin.from('polls').select('*').eq('id', pollId).single(),
+                    supabaseAdmin.from('students').select('*').eq('telegram_id', tid).single(),
+                ]);
 
                 if (!poll || !student) {
-                    await bot.answerCallbackQuery(id, { text: "Error finding record! ❌" });
+                    await bot.answerCallbackQuery(id, { text: 'Error finding record! ❌' });
                     return NextResponse.json({ ok: true });
                 }
 
-                // 2. Prevent Double Submissions
+                // Prevent duplicate submissions
                 const { data: existing } = await supabaseAdmin
                     .from('poll_answers')
-                    .select('*')
+                    .select('id')
                     .eq('poll_id', pollId)
-                    .eq('student_id', student.id)
+                    .eq('student_id', (student as DbStudent).id)
                     .single();
 
                 if (existing) {
-                    await bot.answerCallbackQuery(id, { text: "You already answered! 🚫" });
+                    await bot.answerCallbackQuery(id, { text: 'You already answered! 🚫' });
                     return NextResponse.json({ ok: true });
                 }
 
-                // 3. Scoring Engine (15s sliding scale)
-                const now = Math.floor(Date.now() / 1000);
-                const elapsed = now - message.date;
+                // Scoring: 15-second sliding scale with a 3s grace period
+                const elapsed = Math.floor(Date.now() / 1000) - message.date;
                 const remaining = 15 - elapsed;
-
                 const isCorrect = choice === poll.correct_option;
-                let pts = 0;
-
-                // Grace period: allow submission up to 3s after visual expiration
-                if (isCorrect && remaining >= -3) {
-                    pts = remaining >= 10 ? 10 : Math.max(1, Math.floor(remaining));
-                }
+                const pts = isCorrect && remaining >= -3 ? (remaining >= 10 ? 10 : Math.max(1, Math.floor(remaining))) : 0;
 
                 await supabaseAdmin.from('poll_answers').insert([{
                     poll_id: poll.id,
-                    student_id: student.id,
+                    student_id: (student as DbStudent).id,
                     selected_option: choice,
                     time_taken_seconds: elapsed,
-                    earned_points: pts
+                    earned_points: pts,
                 }]);
 
-                // 4. UI Update: Visual Answer Reveal
-                const getOptionText = (opt: string) => {
-                    if (opt === 'A') return poll.option_a;
-                    if (opt === 'B') return poll.option_b;
-                    if (opt === 'C') return poll.option_c;
-                    return poll.option_d;
-                };
+                // Helper to resolve option text by key
+                const getOptionText = (opt: string) =>
+                    poll[`option_${opt.toLowerCase()}` as 'option_a' | 'option_b' | 'option_c' | 'option_d'];
 
                 const formatBtn = (opt: string) => {
-                    let prefix = "🔘";
-                    if (opt === poll.correct_option) prefix = "✅";
-                    else if (opt === choice && !isCorrect) prefix = "❌";
-                    return (`${prefix} ${opt}) ${getOptionText(opt)}`).padEnd(60) + "⠀";
+                    const prefix = opt === poll.correct_option ? '✅' : (opt === choice && !isCorrect ? '❌' : '🔘');
+                    return (`${prefix} ${opt}) ${getOptionText(opt)}`).padEnd(60) + '⠀';
                 };
 
-                await bot.editMessageReplyMarkup({
-                    inline_keyboard: [
-                        [{ text: formatBtn('A'), callback_data: `ans:${pollId}:A` }],
-                        [{ text: formatBtn('B'), callback_data: `ans:${pollId}:B` }],
-                        [{ text: formatBtn('C'), callback_data: `ans:${pollId}:C` }],
-                        [{ text: formatBtn('D'), callback_data: `ans:${pollId}:D` }]
-                    ]
-                }, { chat_id: message.chat.id, message_id: message.message_id });
+                await bot.editMessageReplyMarkup(
+                    { inline_keyboard: ['A', 'B', 'C', 'D'].map(opt => [{ text: formatBtn(opt), callback_data: `ans:${pollId}:${opt}` }]) },
+                    { chat_id: message.chat.id, message_id: message.message_id }
+                );
 
                 await bot.answerCallbackQuery(id, {
-                    text: isCorrect ? `✅ CORRECT! +${pts} pts` : `❌ INCORRECT! Answer: ${poll.correct_option}`
+                    text: isCorrect ? `✅ CORRECT! +${pts} pts` : `❌ INCORRECT! Answer: ${poll.correct_option}`,
                 });
 
-                // 5. EVENT LOOP YIELD: Trigger Next Question after 1.5s delay
+                // Trigger next question after a short delay so the student sees the result
                 if (poll.quiz_set_id) {
-                    setTimeout(async () => {
-                        await sendNextQuestion(tid, student.id, poll.quiz_set_id);
-                    }, 1500);
+                    setTimeout(() => sendNextQuestion(tid, (student as DbStudent).id, poll.quiz_set_id), 1500);
                 }
 
                 return NextResponse.json({ ok: true });
             }
 
-            // --- ACTION: BROWSE TUTES ---
+            // ── Browse Category ───────────────────────────────────────────────
             if (data.startsWith('cat:')) {
-                const catName = data.split(':')[1];
-                const { data: materials } = await supabaseAdmin.from('materials').select('*').eq('category', catName);
+                const catName = data.slice(4);
+                const { data: materials } = await supabaseAdmin.from('materials').select('id, title').eq('category', catName);
 
-                const kb = materials?.map((m: any) => ([{ text: m.title, callback_data: `mat:${m.id}` }])) || [];
                 await bot.editMessageText(`📚 *Materials in ${catName}:*`, {
                     chat_id: message.chat.id,
                     message_id: message.message_id,
                     parse_mode: 'Markdown',
-                    reply_markup: { inline_keyboard: kb }
+                    reply_markup: { inline_keyboard: materials?.map(m => [{ text: m.title, callback_data: `mat:${m.id}` }]) ?? [] },
                 });
                 return NextResponse.json({ ok: true });
             }
 
-            // --- ACTION: DOWNLOAD TUTE ---
+            // ── Download Material ─────────────────────────────────────────────
             if (data.startsWith('mat:')) {
-                const matId = data.split(':')[1];
-                await bot.editMessageText("⏳ *Preparing authorized document...*", {
+                await bot.editMessageText('⏳ *Preparing authorized document...*', {
                     chat_id: message.chat.id,
                     message_id: message.message_id,
-                    parse_mode: 'Markdown'
+                    parse_mode: 'Markdown',
                 });
-                await handleMaterialDownload(tid, matId, message.chat.id);
+                await handleMaterialDownload(tid, data.slice(4), message.chat.id);
                 return NextResponse.json({ ok: true });
             }
         }
 
         return NextResponse.json({ ok: true });
     } catch (error) {
-        console.error('Webhook Runtime Error:', error);
+        console.error('[Webhook] Runtime Error:', error);
         return NextResponse.json({ ok: false }, { status: 500 });
     }
 }
 
+// ─── Helper: Personalized PDF Delivery ────────────────────────────────────────
+
 /**
- * HELPER: PERSONALIZED DOWNLOAD HANDLER
- * Fetches, watermarks, and delivers a PDF document to the student.
+ * Fetches a material PDF from its stored URL, applies a student-specific watermark,
+ * and sends it directly to the student's chat.
  */
 async function handleMaterialDownload(telegramId: number, matId: string, chatId: number): Promise<void> {
     try {
-        const { data: mt } = await supabaseAdmin.from('materials').select('*').eq('id', matId).single();
-        const { data: st } = await supabaseAdmin.from('students').select('*').eq('telegram_id', telegramId).single();
+        const [{ data: mt }, { data: st }] = await Promise.all([
+            supabaseAdmin.from('materials').select('*').eq('id', matId).single(),
+            supabaseAdmin.from('students').select('full_name, phone_number').eq('telegram_id', telegramId).single(),
+        ]);
 
         if (!mt || !st) return;
 
-        let url = mt.file_url;
-        // Handle Google Drive UC compatibility
+        // Normalize Google Drive share links to direct-download format
+        let url: string = mt.file_url;
         if (url.includes('drive.google.com')) {
-            const driveIdMatch = url.match(/[-\w]{25,}/);
-            if (driveIdMatch) {
-                url = `https://drive.google.com/uc?export=download&id=${driveIdMatch[0]}`;
-            }
+            const match = url.match(/[-\w]{25,}/);
+            if (match) url = `https://drive.google.com/uc?export=download&id=${match[0]}`;
         }
 
         const resp = await fetch(url);
-        const buf = Buffer.from(await resp.arrayBuffer());
+        if (!resp.ok) throw new Error(`Failed to fetch material: HTTP ${resp.status}`);
 
-        // Apply student-specific watermark
+        const buf = Buffer.from(await resp.arrayBuffer());
         const watermarkedBuf = await watermarkPdf(buf, st.full_name, st.phone_number);
 
         await bot.sendChatAction(chatId, 'upload_document');
         await bot.sendDocument(chatId, watermarkedBuf, {
             caption: `📚 *${mt.title}*\n👤 Student: ${st.full_name}\n\nHappy studying! 🎓`,
-            parse_mode: 'Markdown'
+            parse_mode: 'Markdown',
         }, { filename: `${mt.title}.pdf` });
-
     } catch (e) {
-        console.error('[Bot Engine] Download Handler Failed:', e);
+        console.error('[Bot Engine] Material download failed:', e);
     }
 }

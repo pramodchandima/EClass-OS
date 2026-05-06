@@ -1,53 +1,60 @@
 'use client';
 
 import { useState, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
 import { Lock } from 'lucide-react';
+import toast from 'react-hot-toast';
 
 /**
- * ADMIN LOGIN PAGE
- * Provides a secure entry point for administrators.
- * Sets a persistent session cookie that is verified by the system-wide middleware.
+ * Admin Login Page
+ * Verifies credentials server-side via /api/admin/verify, then sets a session
+ * cookie and performs a hard navigation to ensure middleware re-reads the cookie.
  */
 export default function AdminLoginPage() {
-    // --- STATE ---
     const [password, setPassword] = useState('');
-    const [loading, setLoading] = useState(false);
+    const [loading, setLoading]   = useState(false);
+    const [error, setError]       = useState('');
 
-    const router = useRouter();
-
-    // --- LOGIN HANDLER ---
-    const handleLogin = useCallback((e: React.FormEvent) => {
+    const handleLogin = useCallback(async (e: React.FormEvent) => {
         e.preventDefault();
         setLoading(true);
+        setError('');
 
         try {
-            /**
-             * SESSION PERSISTENCE
-             * We set the 'admin_password' cookie with strict security attributes.
-             * Max-Age is set to 24 hours (86400 seconds).
-             */
+            const res = await fetch('/api/admin/verify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password }),
+            });
+
+            if (!res.ok) {
+                const data = await res.json();
+                const msg = data.error ?? 'Incorrect password';
+                setError(msg);
+                toast.error(msg);
+                return;
+            }
+
+            // Set session cookie and perform a hard redirect so Next.js middleware
+            // picks up the new cookie without relying on client-side router cache.
             const isProd = process.env.NODE_ENV === 'production';
-            const cookieAttributes = [
+            document.cookie = [
                 `admin_password=${password}`,
                 'path=/',
                 'max-age=86400',
                 'SameSite=Strict',
-                isProd ? 'Secure' : ''
+                isProd ? 'Secure' : '',
             ].filter(Boolean).join('; ');
 
-            document.cookie = cookieAttributes;
-
-            // Redirect to the main dashboard
-            router.push('/admin');
-        } catch (err) {
-            console.error('[Admin Login] Critical failure:', err);
+            window.location.href = '/admin';
+        } catch {
+            const msg = 'A network error occurred. Please try again.';
+            setError(msg);
+            toast.error(msg);
         } finally {
             setLoading(false);
         }
-    }, [password, router]);
+    }, [password]);
 
-    // --- RENDER ---
     return (
         <div className="min-h-screen bg-[#050505] flex items-center justify-center p-6 sm:p-12 relative overflow-hidden">
             {/* BACKGROUND DECORATION */}
@@ -80,6 +87,11 @@ export default function AdminLoginPage() {
                             required
                             autoFocus
                         />
+                        {error && (
+                            <p className="text-red-500 text-xs mt-3 font-semibold ml-1 animate-in fade-in slide-in-from-top-1">
+                                {error}
+                            </p>
+                        )}
                     </div>
 
                     <button
