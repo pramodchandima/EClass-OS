@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  allowedDevOrigins: ["vigorless-bulah-wavingly.ngrok-free.dev"],
+  serverExternalPackages: ["pdfkit"],
 };
 
 export default nextConfig;
