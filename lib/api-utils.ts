@@ -7,7 +7,9 @@ export function validateAdminSecret(req: NextRequest): boolean {
 
 /** Validates the admin_password cookie against ADMIN_PASSWORD. */
 export function validateAdminCookie(req: NextRequest): boolean {
-    return req.cookies.get('admin_password')?.value === process.env.ADMIN_PASSWORD;
+    const raw = req.cookies.get('admin_password')?.value;
+    if (!raw) return false;
+    return raw === process.env.ADMIN_PASSWORD || decodeURIComponent(raw) === process.env.ADMIN_PASSWORD;
 }
 
 // --- Standardized JSON Response Helpers ---

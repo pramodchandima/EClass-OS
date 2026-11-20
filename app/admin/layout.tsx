@@ -1,9 +1,9 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
-import { Users, BookOpen, Clock, LayoutDashboard, Trophy, LucideIcon, LogOut } from 'lucide-react';
+import { usePathname, useRouter } from 'next/navigation';
+import { Users, BookOpen, Clock, LayoutDashboard, Trophy, LucideIcon, LogOut, Loader2 } from 'lucide-react';
 
 /**
  * NAVIGATION INTERFACES
@@ -18,9 +18,36 @@ interface NavItem {
  * SHARED ADMIN LAYOUT
  * Provides a persistent sidebar navigation and standardized content area for the 
  * administrative portal.
+ * The login page is rendered standalone without this layout.
  */
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
     const pathname = usePathname();
+    const router = useRouter();
+
+    const isLoginPage = pathname ? pathname.startsWith('/admin/login') : false;
+    const [isAuthorized, setIsAuthorized] = useState<boolean>(false);
+    const [checkingAuth, setCheckingAuth] = useState<boolean>(!isLoginPage);
+
+    useEffect(() => {
+        if (isLoginPage) {
+            setCheckingAuth(false);
+            return;
+        }
+
+        // Check if admin_password cookie exists on client side
+        const cookies = document.cookie.split('; ');
+        const hasAdminCookie = cookies.some((c) => {
+            const [key, val] = c.split('=');
+            return key === 'admin_password' && (val || '').trim().length > 0;
+        });
+
+        if (!hasAdminCookie) {
+            router.replace('/admin/login');
+        } else {
+            setIsAuthorized(true);
+            setCheckingAuth(false);
+        }
+    }, [isLoginPage, pathname, router]);
 
     // --- MEMOIZED NAVIGATION CONFIGURATION ---
     const navItems = useMemo<NavItem[]>(() => [
@@ -31,7 +58,21 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         { name: 'Leaderboard', href: '/admin/leaderboard', icon: Trophy },
     ], []);
 
-    // --- RENDER ---
+    // 1. Standalone Login Page: Render login content directly without sidebar or shell
+    if (isLoginPage) {
+        return <>{children}</>;
+    }
+
+    // 2. Auth Loading Guard: Prevent flash of protected UI before auth check completes
+    if (checkingAuth || !isAuthorized) {
+        return (
+            <div className="flex min-h-screen bg-[#0a0a0a] items-center justify-center">
+                <Loader2 className="w-8 h-8 text-purple-500 animate-spin" />
+            </div>
+        );
+    }
+
+    // 3. Authenticated Admin Portal Layout
     return (
         <div className="flex min-h-screen bg-[#0a0a0a] text-zinc-100">
             {/* SIDEBAR NAVIGATION */}

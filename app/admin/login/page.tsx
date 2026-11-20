@@ -34,15 +34,15 @@ export default function AdminLoginPage() {
                 return;
             }
 
-            // Set session cookie and perform a hard redirect so Next.js middleware
+            // Set session cookie and perform a hard redirect so Next.js proxy
             // picks up the new cookie without relying on client-side router cache.
-            const isProd = process.env.NODE_ENV === 'production';
+            const isSecure = typeof window !== 'undefined' && window.location.protocol === 'https:';
             document.cookie = [
-                `admin_password=${password}`,
+                `admin_password=${encodeURIComponent(password)}`,
                 'path=/',
                 'max-age=86400',
                 'SameSite=Strict',
-                isProd ? 'Secure' : '',
+                isSecure ? 'Secure' : '',
             ].filter(Boolean).join('; ');
 
             window.location.href = '/admin';
